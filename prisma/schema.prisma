@@ -1,0 +1,170 @@
+// Ela & Co. — data model (Postgres / Supabase)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+/// Customers authenticate via WhatsApp OTP (phone is the identity).
+model Customer {
+  id        String   @id @default(cuid())
+  phone     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  orders    Order[]
+}
+
+/// One-time passwords for customer login.
+model OtpCode {
+  id        String   @id @default(cuid())
+  phone     String
+  codeHash  String
+  expiresAt DateTime
+  consumed  Boolean  @default(false)
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([phone])
+}
+
+enum StaffRole {
+  ADMIN
+  KITCHEN
+}
+
+/// Admin + kitchen staff authenticate with username + password.
+model StaffUser {
+  id           String    @id @default(cuid())
+  username     String    @unique
+  passwordHash String
+  name         String?
+  role         StaffRole @default(KITCHEN)
+  active       Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+}
+
+/// Menu is managed by admin, shown to customers.
+model MenuItem {
+  id              String   @id @default(cuid())
+  name            String
+  description     String   @default("")
+  price           Int // whole rupees (MRP, before discount)
+  discountPercent Int      @default(0) // 0-90 % off
+  category        String   @default("Meals")
+  tag             String?
+  spice           Int      @default(1) // 0-3 chilli level
+  imageUrl        String?
+  available       Boolean  @default(true)
+  stock           Int? // null = unlimited; else remaining orderable quantity
+  sortOrder       Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  orderItems      OrderItem[]
+}
+
+enum OrderStatus {
+  PENDING // created, awaiting payment
+  PLACED // paid / confirmed, waiting for kitchen
+  PREPARING
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  FAILED
+}
+
+model Order {
+  id            String        @id @default(cuid())
+  customer      Customer?     @relation(fields: [customerId], references: [id])
+  customerId    String?
+
+  customerName  String
+  customerPhone String
+  address       String
+  notes         String?
+
+  items         OrderItem[]
+
+  subtotal      Int // sum of discounted line prices
+  discountTotal Int           @default(0) // total saved vs MRP
+  deliveryFee   Int           @default(0)
+  total         Int
+
+  invoiceNo     String?       @unique
+
+  status        OrderStatus   @default(PENDING)
+  paymentMethod String        @default("razorpay") // razorpay | cod
+  paymentStatus PaymentStatus @default(UNPAID)
+
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([status])
+  @@index([customerId])
+}
+
+model OrderItem {
+  id         String    @id @default(cuid())
+  order      Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId    String
+  menuItem   MenuItem? @relation(fields: [menuItemId], references: [id])
+  menuItemId String?
+  name       String
+  mrp        Int       @default(0) // original unit price
+  price      Int // discounted unit price actually charged
+  qty        Int
+
+  @@index([orderId])
+}
+
+/// Singleton store configuration (admin can stop taking orders).
+model StoreSetting {
+  id              Int      @id @default(1)
+  acceptingOrders Boolean  @default(true)
+  closedMessage   String?
+  updatedAt       DateTime @updatedAt
+}
+
+/// Atomic counters (e.g. sequential invoice numbers).
+model Counter {
+  name  String @id
+  value Int    @default(0)
+}
+
+/// Immutable audit trail — one row per mutating action across the system.
+model AuditLog {
+  id         String   @id @default(cuid())
+  createdAt  DateTime @default(now())
+
+  actorType  String // admin | kitchen | customer | system
+  actorId    String?
+  actorLabel String? // username / phone / name for readability
+
+  action     String // e.g. order.status_changed, menu.updated, auth.staff_login
+  entityType String? // order | menuItem | staffUser | storeSetting | auth
+  entityId   String?
+
+  summary    String? // human-readable one-liner
+  metadata   Json? // structured before/after + context
+
+  ip         String?
+  userAgent  String?
+
+  @@index([createdAt])
+  @@index([action])
+  @@index([entityType, entityId])
+  @@index([actorId])
+}
