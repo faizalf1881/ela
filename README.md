@@ -103,19 +103,38 @@ stock decrement, kitchen status flow, store open/close, and analytics.
 
 ## Deploy to Vercel
 
-1. Push this folder to a Git repo and import it in Vercel.
-2. Create a Postgres database (**Supabase**, **Neon**, or **Vercel Postgres**).
-3. In Vercel → **Settings → Environment Variables**, add everything from
-   `.env.example` (DB URLs, `JWT_SECRET`, `ADMIN_*`, `RAZORPAY_*`,
-   `NEXT_PUBLIC_RAZORPAY_KEY_ID`, `WHATSAPP_*`, `NEXT_PUBLIC_SITE_URL`).
-   - `DATABASE_URL` → pooled connection (Supabase port `6543`, `?pgbouncer=true`)
-   - `DIRECT_URL` → direct connection (port `5432`) — used for migrations
-4. Set the **Build Command** to `npm run vercel-build` (runs `prisma migrate deploy`
-   before building, so your DB schema is always applied). Then seed once locally
-   against the prod `DATABASE_URL`: `npm run db:seed`.
+Already git-committed and configured — `vercel.json` sets the build command
+(`npm run vercel-build`, which runs `prisma migrate deploy`) and pins the
+**Mumbai (`bom1`)** region for low latency in India.
 
-> The default `build` script does **not** run migrations, so local builds never need a
-> live DB. `vercel-build` does — use it for deploys.
+1. **Create a Postgres DB** — Supabase, Neon, or Vercel Postgres.
+2. **Push to GitHub** and import the repo in Vercel (or run `npx vercel`):
+   ```bash
+   git remote add origin https://github.com/<you>/ela-and-co.git
+   git push -u origin main
+   ```
+3. **Set env vars** in Vercel → *Settings → Environment Variables* (copy from
+   `.env.example`): `DATABASE_URL` (pooled, port `6543`, `?pgbouncer=true`),
+   `DIRECT_URL` (direct, port `5432`), `JWT_SECRET`, `ADMIN_USERNAME`,
+   `ADMIN_PASSWORD`, `RAZORPAY_*`, `NEXT_PUBLIC_RAZORPAY_KEY_ID`, `WHATSAPP_*`,
+   `NEXT_PUBLIC_SITE_URL`, `OTP_DEV_MODE=false`. **Do not** set `OTP_LOG_FILE`.
+4. **Deploy.** The build applies migrations automatically. Then **seed once**
+   against the production DB (locally, with prod `DATABASE_URL` in `.env`):
+   `npm run db:seed`.
+
+> Set env vars **before** the first deploy — the build runs `prisma migrate deploy`
+> and needs `DIRECT_URL`.
+
+### Performance / caching
+- The **homepage is ISR-cached** (static HTML from the CDN, regenerated at most
+  every 5 min) and **busted instantly** when an admin edits the menu or toggles the
+  store (`revalidateTag`). Local load test: **~210 req/s, p99 323 ms** on one
+  machine — on Vercel's CDN the homepage scales effectively without limit.
+- Menu + store-status reads use the **Data Cache**, so they don't hit Postgres on
+  every request. Order/stock writes always re-check **live** DB stock, so caching
+  never causes overselling.
+- Use a **paid Postgres tier** for real concurrency (the pooled `DATABASE_URL`
+  keeps serverless connection counts bounded).
 
 ---
 
