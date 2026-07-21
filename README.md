@@ -107,15 +107,15 @@ Already git-committed and configured — `vercel.json` sets the build command
 (`npm run vercel-build`, which runs `prisma migrate deploy`) and pins the
 **Mumbai (`bom1`)** region for low latency in India.
 
-1. **Create a Postgres DB** — Supabase, Neon, or Vercel Postgres.
-2. **Push to GitHub** and import the repo in Vercel (or run `npx vercel`):
-   ```bash
-   git remote add origin https://github.com/<you>/ela-and-co.git
-   git push -u origin main
-   ```
+1. **Create a Neon Postgres DB** (free) — [neon.tech](https://neon.tech) → new project.
+   From the **Connection string** widget copy two strings:
+   - `DATABASE_URL` → the **pooled** string (host has `-pooler`)
+   - `DIRECT_URL` → the **direct** string (toggle *Connection pooling* off; no `-pooler`)
+
+   Both should end with `?sslmode=require`.
+2. **Import the repo** ([faizalf1881/ela](https://github.com/faizalf1881/ela)) in Vercel.
 3. **Set env vars** in Vercel → *Settings → Environment Variables* (copy from
-   `.env.example`): `DATABASE_URL` (pooled, port `6543`, `?pgbouncer=true`),
-   `DIRECT_URL` (direct, port `5432`), `JWT_SECRET`, `ADMIN_USERNAME`,
+   `.env.example`): `DATABASE_URL`, `DIRECT_URL`, `JWT_SECRET`, `ADMIN_USERNAME`,
    `ADMIN_PASSWORD`, `RAZORPAY_*`, `NEXT_PUBLIC_RAZORPAY_KEY_ID`, `WHATSAPP_*`,
    `NEXT_PUBLIC_SITE_URL`, `OTP_DEV_MODE=false`. **Do not** set `OTP_LOG_FILE`.
 4. **Deploy.** The build applies migrations automatically. Then **seed once**
@@ -133,8 +133,9 @@ Already git-committed and configured — `vercel.json` sets the build command
 - Menu + store-status reads use the **Data Cache**, so they don't hit Postgres on
   every request. Order/stock writes always re-check **live** DB stock, so caching
   never causes overselling.
-- Use a **paid Postgres tier** for real concurrency (the pooled `DATABASE_URL`
-  keeps serverless connection counts bounded).
+- **Neon free** handles a real single-restaurant workload comfortably; the pooled
+  `DATABASE_URL` keeps serverless connection counts bounded. Upgrade to paid only to
+  remove cold starts or for much higher concurrency.
 
 ---
 
