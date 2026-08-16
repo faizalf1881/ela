@@ -151,11 +151,17 @@ async function main() {
   const kme = await (await kitchen.fetch("/api/auth/me")).json();
   ok(kme.user?.role === "kitchen", "session role = kitchen");
 
-  // ---------- Customer OTP ----------
-  section("Customer WhatsApp OTP login");
+  // ---------- Customer OTP: sign up vs login ----------
+  section("Customer WhatsApp OTP sign-up & login");
   const phone = "9" + String(Date.now()).slice(-9); // unique 10-digit
-  const reqOtp = await new Client().fetch("/api/auth/otp/request", { method: "POST", body: JSON.stringify({ phone }) });
-  ok(reqOtp.status === 200, "request OTP → 200");
+
+  // Unregistered number cannot "log in" — it is guided to sign up (spec #2).
+  const loginUnknown = await new Client().fetch("/api/auth/otp/request", { method: "POST", body: JSON.stringify({ phone, mode: "login" }) });
+  const luJson = await loginUnknown.json();
+  ok(loginUnknown.status === 404 && luJson.notRegistered === true, "login with unregistered number → 404 + notRegistered");
+
+  const reqOtp = await new Client().fetch("/api/auth/otp/request", { method: "POST", body: JSON.stringify({ phone, mode: "signup" }) });
+  ok(reqOtp.status === 200, "sign-up OTP → 200");
   const code = await readOtp("91" + phone);
   ok(!!code, `OTP captured from server log (${code})`);
 
@@ -163,7 +169,45 @@ async function main() {
   const badVerify = await customer.fetch("/api/auth/otp/verify", { method: "POST", body: JSON.stringify({ phone, code: "000000" }) });
   ok(badVerify.status === 400, "wrong OTP → 400");
   const verify = await customer.fetch("/api/auth/otp/verify", { method: "POST", body: JSON.stringify({ phone, code, name: "E2E Customer" }) });
-  ok(verify.status === 200, "correct OTP → 200 (logged in)");
+  ok(verify.status === 200, "correct OTP → 200 (account created + logged in)");
+  const meCust = await (await customer.fetch("/api/auth/me")).json();
+  ok(meCust.user?.name === "E2E Customer", "profile name saved at sign-up (not asked again)");
+
+  // Now registered: login mode is accepted (throttle makes an immediate resend 429).
+  const loginKnown = await new Client().fetch("/api/auth/otp/request", { method: "POST", body: JSON.stringify({ phone, mode: "login" }) });
+  ok(loginKnown.status === 200 || loginKnown.status === 429, "login with registered number accepted (no 404)");
+
+  // ---------- Delivery locations ----------
+  section("Delivery locations");
+  const locRes = await admin.fetch("/api/locations", {
+    method: "POST",
+    body: JSON.stringify({ name: "E2E Area " + Date.now().toString().slice(-5), area: "Test zone", deliveryFee: 45, active: true }),
+  });
+  const locJson = await locRes.json();
+  ok(locRes.status === 201, `admin creates delivery location → 201 ${locRes.status !== 201 ? JSON.stringify(locJson) : ""}`);
+  const locationId: string = locJson.location.id;
+  const pubLocs = await (await new Client().fetch("/api/locations")).json();
+  ok(pubLocs.locations.some((l: { id: string }) => l.id === locationId), "location visible publicly");
+  const custLoc = await customer.fetch("/api/locations", { method: "POST", body: JSON.stringify({ name: "Nope" }) });
+  ok(custLoc.status === 403, "customer cannot create locations → 403");
+
+  // ---------- Coupons ----------
+  section("Coupons");
+  const couponCode = "E2E" + Date.now().toString().slice(-6);
+  const cRes = await admin.fetch("/api/coupons", {
+    method: "POST",
+    body: JSON.stringify({ code: couponCode, discountType: "PERCENT", value: 10, minOrder: 100, active: true }),
+  });
+  ok(cRes.status === 201, `admin creates coupon → 201 ${cRes.status !== 201 ? JSON.stringify(await cRes.json()) : ""}`);
+  const dupe = await admin.fetch("/api/coupons", { method: "POST", body: JSON.stringify({ code: couponCode, discountType: "PERCENT", value: 5 }) });
+  ok(dupe.status === 409, "duplicate coupon code → 409");
+  const badCoupon = await customer.fetch("/api/coupons/validate", { method: "POST", body: JSON.stringify({ code: "NOPE" + Date.now(), subtotal: 500 }) });
+  ok((await badCoupon.json()).ok === false, "invalid coupon rejected");
+  const lowCart = await customer.fetch("/api/coupons/validate", { method: "POST", body: JSON.stringify({ code: couponCode, subtotal: 50 }) });
+  ok((await lowCart.json()).ok === false, "coupon below min order rejected");
+  const goodCoupon = await customer.fetch("/api/coupons/validate", { method: "POST", body: JSON.stringify({ code: couponCode, subtotal: 500 }) });
+  const gc = await goodCoupon.json();
+  ok(gc.ok === true && gc.discount === 50, `valid coupon → ₹${gc.discount} off 500`);
 
   // ---------- Razorpay order + verify ----------
   section("Order + Razorpay create + signature verify");
@@ -173,12 +217,18 @@ async function main() {
   ];
   const orderRes = await customer.fetch("/api/orders", {
     method: "POST",
-    body: JSON.stringify({ items: orderItems, name: "E2E Customer", phone: "+91" + phone, address: "1 Test St, Kochi 682001", paymentMethod: "razorpay" }),
+    body: JSON.stringify({ items: orderItems, name: "E2E Customer", phone: "+91" + phone, deliveryLocationId: locationId, couponCode, paymentMethod: "razorpay" }),
   });
   const orderData = await orderRes.json();
   ok(orderRes.status === 200, `create razorpay order → 200 ${orderRes.status !== 200 ? JSON.stringify(orderData) : ""}`);
   ok(!!orderData.razorpay?.orderId?.startsWith("order_"), "Razorpay order_id returned");
   ok(orderData.order.discountTotal > 0, `discount applied (saved ₹${orderData.order?.discountTotal})`);
+  ok(orderData.order.couponDiscount > 0 && orderData.order.couponCode === couponCode, `coupon applied server-side (−₹${orderData.order?.couponDiscount})`);
+  ok(orderData.order.deliveryFee === 45, `delivery fee from location (₹${orderData.order?.deliveryFee})`);
+  ok(
+    orderData.order.total === orderData.order.subtotal - orderData.order.couponDiscount + orderData.order.deliveryFee,
+    "total = subtotal − coupon + delivery",
+  );
 
   const rzpOrderId = orderData.razorpay.orderId;
   const dbOrderId = orderData.order.id;
@@ -212,7 +262,7 @@ async function main() {
   // add testItem to menu availability check: order the test dish (stock 10) via COD
   const codRes = await customer.fetch("/api/orders", {
     method: "POST",
-    body: JSON.stringify({ items: [{ id: testItem.id, qty: 3 }], name: "E2E", phone: "+91" + phone, address: "1 Test St", paymentMethod: "cod" }),
+    body: JSON.stringify({ items: [{ id: testItem.id, qty: 3 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
   });
   const cod = await codRes.json();
   ok(codRes.status === 200 && cod.paymentMethod === "cod", "COD order placed → 200");
@@ -234,7 +284,7 @@ async function main() {
   await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ acceptingOrders: false }) });
   const closedOrder = await customer.fetch("/api/orders", {
     method: "POST",
-    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, address: "1 Test St", paymentMethod: "cod" }),
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
   });
   ok(closedOrder.status === 403, "orders blocked when store closed → 403");
   await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ acceptingOrders: true }) });
@@ -251,6 +301,91 @@ async function main() {
   ok(daily.summary.totalOrders >= 2, `analytics counts orders (${daily.summary.totalOrders})`);
   ok(daily.topItems.length > 0, "top sellers computed");
   ok(daily.summary.totalRevenue > 0, `revenue tracked (₹${daily.summary.totalRevenue})`);
+
+  // ---------- Accounts (invoices) ----------
+  section("Accounts module");
+  const acc = await (await admin.fetch("/api/admin/accounts")).json();
+  ok(Array.isArray(acc.invoices) && acc.invoices.length > 0, `invoices listed (${acc.invoices?.length})`);
+  ok(acc.invoices.some((i: { id: string }) => i.id === dbOrderId), "paid order appears in accounts");
+  ok(acc.summary.total > 0, `accounts summary totals (₹${acc.summary?.total})`);
+  const paidOnly = await (await admin.fetch("/api/admin/accounts?status=PAID")).json();
+  ok(paidOnly.invoices.every((i: { paymentStatus: string }) => i.paymentStatus === "PAID"), "status filter works");
+  const manual = await admin.fetch("/api/admin/accounts", {
+    method: "POST",
+    body: JSON.stringify({ customerName: "Walk-in E2E", customerPhone: "+919000000000", items: [{ name: "Sadya", price: 300, qty: 2 }], paid: true }),
+  });
+  const manualJson = await manual.json();
+  ok(manual.status === 201 && manualJson.order?.invoiceNo, `manual invoice created (${manualJson.order?.invoiceNo})`);
+  ok(manualJson.order?.total === 600, "manual invoice total computed");
+  const custAcc = await customer.fetch("/api/admin/accounts");
+  ok(custAcc.status === 403, "accounts are admin-only → 403");
+
+  // ---------- CRM ----------
+  section("CRM module");
+  const crm = await (await admin.fetch("/api/admin/crm")).json();
+  ok(Array.isArray(crm.customers) && crm.customers.length > 0, `CRM lists customers (${crm.customers?.length})`);
+  const crmMe = crm.customers.find((c: { phone: string }) => c.phone.endsWith(phone.slice(-10)));
+  ok(!!crmMe, "E2E customer present in CRM");
+  ok(crmMe.totalOrders >= 2 && crmMe.totalSpent > 0, `aggregates computed (${crmMe?.totalOrders} orders, ₹${crmMe?.totalSpent})`);
+  const crmPatch = await admin.fetch(`/api/admin/crm/${crmMe.id}`, { method: "PATCH", body: JSON.stringify({ notes: "VIP e2e" }) });
+  ok(crmPatch.status === 200, "admin can save CRM notes");
+
+  // ---------- Reviews ----------
+  section("Reviews management");
+  const revCreate = await admin.fetch("/api/reviews", {
+    method: "POST",
+    body: JSON.stringify({ authorName: "E2E Reviewer", location: "Trivandrum", rating: 5, body: "Excellent sadya, e2e verified.", published: true }),
+  });
+  const revJson = await revCreate.json();
+  ok(revCreate.status === 201, "admin creates review → 201");
+  const reviewId: string = revJson.review.id;
+  const pubRevs = await (await new Client().fetch("/api/reviews")).json();
+  ok(pubRevs.reviews.some((r: { id: string }) => r.id === reviewId), "published review is public");
+  const submitted = await new Client().fetch("/api/reviews/submit", {
+    method: "POST",
+    body: JSON.stringify({ authorName: "Walk-in", location: "Pattom", rating: 4, body: "Submitted via collection link." }),
+  });
+  ok(submitted.status === 200, "public review submission → 200");
+  const allRevs = await (await admin.fetch("/api/reviews?all=1")).json();
+  ok(allRevs.reviews.some((r: { source: string; published: boolean }) => r.source === "collected" && !r.published), "submitted review is unpublished (moderation)");
+  const pubRevs2 = await (await new Client().fetch("/api/reviews")).json();
+  ok(!pubRevs2.reviews.some((r: { source: string }) => r.source === "collected"), "unmoderated review not shown publicly");
+  await admin.fetch(`/api/reviews/${reviewId}`, { method: "DELETE" });
+
+  // ---------- Support tickets ----------
+  section("Support tickets");
+  const tRes = await customer.fetch("/api/tickets", {
+    method: "POST",
+    body: JSON.stringify({ category: "Delivery Issue", subject: "E2E test complaint", body: "The order arrived late.", orderId: dbOrderId }),
+  });
+  const tJson = await tRes.json();
+  ok(tRes.status === 201 && tJson.ticket?.ticketNo?.startsWith("TKT-"), `ticket created (${tJson.ticket?.ticketNo})`);
+  const ticketId: string = tJson.ticket.id;
+  const staffReply = await admin.fetch(`/api/tickets/${ticketId}`, { method: "PATCH", body: JSON.stringify({ message: "Sorry! Looking into it.", internal: false }) });
+  ok(staffReply.status === 200, "admin replies to ticket");
+  await admin.fetch(`/api/tickets/${ticketId}`, { method: "PATCH", body: JSON.stringify({ message: "Internal: refund approved", internal: true }) });
+  const custView = await (await customer.fetch("/api/tickets")).json();
+  const myTicket = custView.tickets.find((t: { id: string }) => t.id === ticketId);
+  ok(!!myTicket, "customer sees own ticket");
+  ok(!myTicket.messages.some((m: { body: string }) => m.body.includes("Internal:")), "internal note hidden from customer");
+  const staffView = await (await admin.fetch("/api/tickets")).json();
+  const adminTicket = staffView.tickets.find((t: { id: string }) => t.id === ticketId);
+  ok(adminTicket.messages.some((m: { internal: boolean }) => m.internal), "admin sees internal note");
+  const custEscalate = await customer.fetch(`/api/tickets/${ticketId}`, { method: "PATCH", body: JSON.stringify({ status: "RESOLVED" }) });
+  ok(custEscalate.status === 403, "customer cannot set ticket status → 403");
+  const resolved = await admin.fetch(`/api/tickets/${ticketId}`, { method: "PATCH", body: JSON.stringify({ status: "RESOLVED" }) });
+  ok((await resolved.json()).ticket?.status === "RESOLVED", "admin resolves ticket");
+
+  // ---------- Label QR scan lookup ----------
+  section("Delivery label scan");
+  const scanFull = await kitchen.fetch("/api/orders/scan", { method: "POST", body: JSON.stringify({ code: dbOrderId }) });
+  ok((await scanFull.json()).order?.id === dbOrderId, "scan by full order id finds order");
+  const scanShort = await kitchen.fetch("/api/orders/scan", { method: "POST", body: JSON.stringify({ code: dbOrderId.slice(-6) }) });
+  ok(scanShort.status === 200, "scan by short code finds order");
+  const scanBad = await kitchen.fetch("/api/orders/scan", { method: "POST", body: JSON.stringify({ code: "zzzznotanorder" }) });
+  ok(scanBad.status === 404, "unknown scan code → 404");
+  const scanCust = await customer.fetch("/api/orders/scan", { method: "POST", body: JSON.stringify({ code: dbOrderId }) });
+  ok(scanCust.status === 403, "customers cannot scan → 403");
 
   // ---------- Audit trail ----------
   section("Audit trail");
