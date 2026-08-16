@@ -1,11 +1,11 @@
-import { getPublicMenu, getStoreSetting } from "@/lib/menu-cache";
+import { getPublicMenu, getStoreSetting, getPublishedReviews } from "@/lib/menu-cache";
 import { Navbar } from "@/components/site/Navbar";
 import { Hero } from "@/components/site/Hero";
 import { MenuGrid, type MenuCardItem } from "@/components/site/MenuGrid";
 import { CartBar } from "@/components/site/CartBar";
 import { Story } from "@/components/site/Story";
 import { WhyUs } from "@/components/site/WhyUs";
-import { Reviews } from "@/components/site/Reviews";
+import { Reviews, type ReviewItem } from "@/components/site/Reviews";
 import { Gallery } from "@/components/site/Gallery";
 import { CTA } from "@/components/site/CTA";
 import { Footer, WhatsAppFab } from "@/components/site/Footer";
@@ -15,9 +15,9 @@ import { Footer, WhatsAppFab } from "@/components/site/Footer";
 // (revalidateTag on the "menu"/"settings" tags this page's data reads).
 export const revalidate = 300;
 
-async function getData(): Promise<{ menu: MenuCardItem[]; accepting: boolean; closedMessage: string | null }> {
+async function getData(): Promise<{ menu: MenuCardItem[]; accepting: boolean; closedMessage: string | null; reviews: ReviewItem[] }> {
   try {
-    const [items, setting] = await Promise.all([getPublicMenu(), getStoreSetting()]);
+    const [items, setting, reviews] = await Promise.all([getPublicMenu(), getStoreSetting(), getPublishedReviews()]);
     return {
       menu: items.map((m) => ({
         id: m.id,
@@ -33,14 +33,15 @@ async function getData(): Promise<{ menu: MenuCardItem[]; accepting: boolean; cl
       })),
       accepting: setting ? setting.acceptingOrders : true,
       closedMessage: setting?.closedMessage ?? null,
+      reviews: reviews.map((r) => ({ authorName: r.authorName, location: r.location, rating: r.rating, body: r.body })),
     };
   } catch {
-    return { menu: [], accepting: true, closedMessage: null };
+    return { menu: [], accepting: true, closedMessage: null, reviews: [] };
   }
 }
 
 export default async function HomePage() {
-  const { menu, accepting, closedMessage } = await getData();
+  const { menu, accepting, closedMessage, reviews } = await getData();
   return (
     <main className="min-h-screen bg-background">
       <Navbar />
@@ -55,7 +56,7 @@ export default async function HomePage() {
       <MenuGrid items={menu} accepting={accepting} />
       <Story />
       <WhyUs />
-      <Reviews />
+      <Reviews reviews={reviews} />
       <Gallery />
       <CTA />
       <Footer />
