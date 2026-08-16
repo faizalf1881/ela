@@ -12,11 +12,15 @@ datasource db {
 
 /// Customers authenticate via WhatsApp OTP (phone is the identity).
 model Customer {
-  id        String   @id @default(cuid())
-  phone     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  orders    Order[]
+  id          String    @id @default(cuid())
+  phone       String    @unique
+  name        String?
+  address     String? // saved delivery address / landmark
+  notes       String? // admin CRM notes
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  orders      Order[]
+  tickets     Ticket[]
 }
 
 /// One-time passwords for customer login.
@@ -65,7 +69,7 @@ model MenuItem {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  orderItems      OrderItem[]
+  orderItems OrderItem[]
 }
 
 enum OrderStatus {
@@ -84,33 +88,41 @@ enum PaymentStatus {
 }
 
 model Order {
-  id            String        @id @default(cuid())
-  customer      Customer?     @relation(fields: [customerId], references: [id])
-  customerId    String?
+  id         String    @id @default(cuid())
+  customer   Customer? @relation(fields: [customerId], references: [id])
+  customerId String?
 
   customerName  String
   customerPhone String
   address       String
   notes         String?
 
-  items         OrderItem[]
+  deliveryLocation   DeliveryLocation? @relation(fields: [deliveryLocationId], references: [id])
+  deliveryLocationId String?
 
-  subtotal      Int // sum of discounted line prices
-  discountTotal Int           @default(0) // total saved vs MRP
-  deliveryFee   Int           @default(0)
-  total         Int
+  items OrderItem[]
 
-  invoiceNo     String?       @unique
+  subtotal       Int // sum of discounted line prices
+  discountTotal  Int     @default(0) // total saved vs MRP
+  couponCode     String?
+  couponDiscount Int     @default(0) // saved via coupon
+  deliveryFee    Int     @default(0)
+  total          Int
+
+  invoiceNo String? @unique
+  source    String  @default("web") // web | manual (admin-created invoice)
 
   status        OrderStatus   @default(PENDING)
-  paymentMethod String        @default("razorpay") // razorpay | cod
+  paymentMethod String        @default("razorpay") // razorpay | cod | manual
   paymentStatus PaymentStatus @default(UNPAID)
 
   razorpayOrderId   String?
   razorpayPaymentId String?
 
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  tickets Ticket[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([status])
   @@index([customerId])
@@ -146,8 +158,8 @@ model Counter {
 
 /// Immutable audit trail — one row per mutating action across the system.
 model AuditLog {
-  id         String   @id @default(cuid())
-  createdAt  DateTime @default(now())
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
 
   actorType  String // admin | kitchen | customer | system
   actorId    String?
@@ -157,14 +169,108 @@ model AuditLog {
   entityType String? // order | menuItem | staffUser | storeSetting | auth
   entityId   String?
 
-  summary    String? // human-readable one-liner
-  metadata   Json? // structured before/after + context
+  summary  String? // human-readable one-liner
+  metadata Json? // structured before/after + context
 
-  ip         String?
-  userAgent  String?
+  ip        String?
+  userAgent String?
 
   @@index([createdAt])
   @@index([action])
   @@index([entityType, entityId])
   @@index([actorId])
+}
+
+/// Delivery areas the store serves (admin-managed). Replaces free-text address.
+model DeliveryLocation {
+  id          String   @id @default(cuid())
+  name        String // e.g. "Pattom"
+  area        String? // optional sub-area / description
+  deliveryFee Int      @default(40)
+  active      Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  orders Order[]
+}
+
+enum DiscountType {
+  PERCENT
+  FIXED
+}
+
+/// Discount coupons applied at checkout (admin-managed).
+model Coupon {
+  id           String       @id @default(cuid())
+  code         String       @unique
+  discountType DiscountType @default(PERCENT)
+  value        Int // percent (0-100) or fixed rupees
+  minOrder     Int? // minimum subtotal to qualify
+  maxDiscount  Int? // cap on the discount (percent coupons)
+  usageLimit   Int? // null = unlimited total redemptions
+  usedCount    Int          @default(0)
+  active       Boolean      @default(true)
+  startsAt     DateTime?
+  endsAt       DateTime?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+}
+
+/// Website testimonials (admin-managed).
+model Review {
+  id         String   @id @default(cuid())
+  authorName String
+  location   String?
+  rating     Int      @default(5) // 1-5
+  body       String
+  published  Boolean  @default(true)
+  source     String   @default("manual") // manual | collected
+  sortOrder  Int      @default(0)
+  createdAt  DateTime @default(now())
+
+  @@index([published])
+}
+
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_CUSTOMER
+  RESOLVED
+  CLOSED
+}
+
+/// Customer support / complaint tickets.
+model Ticket {
+  id            String       @id @default(cuid())
+  ticketNo      String       @unique
+  customer      Customer?    @relation(fields: [customerId], references: [id])
+  customerId    String?
+  customerName  String
+  customerPhone String
+  category      String // Order Issue | Payment Issue | Delivery Issue | Refund Request | Technical Issue | Feedback | Other
+  subject       String
+  order         Order?       @relation(fields: [orderId], references: [id])
+  orderId       String?
+  status        TicketStatus @default(OPEN)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  messages TicketMessage[]
+
+  @@index([status])
+  @@index([customerId])
+  @@index([createdAt])
+}
+
+model TicketMessage {
+  id          String   @id @default(cuid())
+  ticket      Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  ticketId    String
+  authorType  String // customer | staff | system
+  authorLabel String?
+  body        String
+  internal    Boolean  @default(false) // admin-only internal note (hidden from customer)
+  createdAt   DateTime @default(now())
+
+  @@index([ticketId])
 }

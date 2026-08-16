@@ -3,13 +3,19 @@
 import { useEffect, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText } from "lucide-react";
+import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText, MapPin, TicketPercent, Wallet, Contact, Star, LifeBuoy } from "lucide-react";
 import { useAuth, type Role } from "@/lib/auth-client";
 
 const ADMIN_NAV = [
   { href: "/admin", label: "Orders", icon: ClipboardList },
+  { href: "/admin/accounts", label: "Accounts", icon: Wallet },
   { href: "/admin/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/admin/menu", label: "Menu", icon: UtensilsCrossed },
+  { href: "/admin/locations", label: "Locations", icon: MapPin },
+  { href: "/admin/coupons", label: "Coupons", icon: TicketPercent },
+  { href: "/admin/crm", label: "Customers", icon: Contact },
+  { href: "/admin/reviews", label: "Reviews", icon: Star },
+  { href: "/admin/complaints", label: "Support", icon: LifeBuoy },
   { href: "/admin/staff", label: "Kitchen Staff", icon: Users },
   { href: "/admin/audit", label: "Audit", icon: ScrollText },
 ];
@@ -53,14 +59,14 @@ export function StaffShell({ allow, children }: { allow: Role[]; children: React
               </div>
             </div>
 
-            <nav className="hidden sm:flex items-center gap-1">
+            <nav className="hidden sm:flex items-center gap-1 min-w-0 flex-1 overflow-x-auto">
               {nav.map(({ href, label, icon: Icon }) => {
                 const active = pathname === href;
                 return (
                   <Link
                     key={href}
                     href={href}
-                    className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm transition-colors ${
+                    className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-sm whitespace-nowrap transition-colors ${
                       active ? "bg-primary text-primary-foreground" : "text-foreground/80 hover:bg-muted"
                     }`}
                   >

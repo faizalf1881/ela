@@ -7,17 +7,16 @@ import { effectivePrice } from "@/lib/pricing";
 import { finalizeOrder } from "@/lib/fulfillment";
 import { notifyOrderStatus, notifyNewOrderToAdmin } from "@/lib/notify";
 import { audit, actorFrom } from "@/lib/audit";
+import { evaluateCoupon } from "@/lib/coupon";
 
 export const runtime = "nodejs";
-
-const DELIVERY_FEE = 40;
 
 const bodySchema = z.object({
   items: z.array(z.object({ id: z.string(), qty: z.number().int().min(1).max(50) })).min(1),
   name: z.string().trim().min(1).max(120),
   phone: z.string().trim().min(6).max(20),
-  address: z.string().trim().min(6).max(500),
-  notes: z.string().max(500).optional(),
+  deliveryLocationId: z.string().trim().min(1),
+  couponCode: z.string().trim().max(40).optional(),
   paymentMethod: z.enum(["razorpay", "cod"]).default("razorpay"),
 });
 
@@ -66,7 +65,14 @@ export async function POST(req: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: "Invalid order details" }, { status: 400 });
   }
-  const { items, name, phone, address, notes, paymentMethod } = parsed.data;
+  const { items, name, phone, deliveryLocationId, couponCode, paymentMethod } = parsed.data;
+
+  // Delivery location must exist and be active — it sets the delivery fee & address.
+  const location = await prisma.deliveryLocation.findFirst({ where: { id: deliveryLocationId, active: true } });
+  if (!location) {
+    return NextResponse.json({ error: "Please choose a valid delivery location." }, { status: 400 });
+  }
+  const address = location.area ? `${location.name}, ${location.area}` : location.name;
 
   // Recompute prices & validate stock from the DB — never trust the client.
   const ids = items.map((i) => i.id);
@@ -98,8 +104,19 @@ export async function POST(req: Request) {
 
   const subtotal = lineItems.reduce((n, i) => n + i.price * i.qty, 0);
   const discountTotal = lineItems.reduce((n, i) => n + (i.mrp - i.price) * i.qty, 0);
-  const deliveryFee = subtotal > 0 ? DELIVERY_FEE : 0;
-  const total = subtotal + deliveryFee;
+  const deliveryFee = subtotal > 0 ? location.deliveryFee : 0;
+
+  // Coupon — re-validated server-side against the live subtotal (never trust the client).
+  let couponDiscount = 0;
+  let appliedCode: string | null = null;
+  if (couponCode) {
+    const cr = await evaluateCoupon(couponCode, subtotal);
+    if (!cr.ok) return NextResponse.json({ error: cr.error }, { status: 400 });
+    couponDiscount = cr.discount;
+    appliedCode = cr.code;
+  }
+
+  const total = Math.max(0, subtotal - couponDiscount) + deliveryFee;
 
   if (total < 1) {
     return NextResponse.json({ error: "Order total too low." }, { status: 400 });
@@ -111,9 +128,11 @@ export async function POST(req: Request) {
       customerName: name,
       customerPhone: phone,
       address,
-      notes: notes || null,
+      deliveryLocationId: location.id,
       subtotal,
       discountTotal,
+      couponCode: appliedCode,
+      couponDiscount,
       deliveryFee,
       total,
       paymentMethod,
@@ -124,13 +143,18 @@ export async function POST(req: Request) {
     include: { items: true },
   });
 
+  // Count the redemption once the order exists.
+  if (appliedCode) {
+    await prisma.coupon.update({ where: { code: appliedCode }, data: { usedCount: { increment: 1 } } }).catch(() => {});
+  }
+
   await audit({
     actor: actorFrom(s),
     action: "order.created",
     entityType: "order",
     entityId: created.id,
     summary: `Order placed (₹${total}, ${paymentMethod})`,
-    metadata: { total, subtotal, discountTotal, deliveryFee, paymentMethod, items: lineItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) },
+    metadata: { total, subtotal, discountTotal, couponCode: appliedCode, couponDiscount, deliveryFee, location: location.name, paymentMethod, items: lineItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) },
     req,
   });
 

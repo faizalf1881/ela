@@ -16,6 +16,8 @@ import {
   Loader2,
   LogIn,
   FileText,
+  TicketPercent,
+  X,
 } from "lucide-react";
 import { Navbar } from "@/components/site/Navbar";
 import { Footer, WhatsAppFab } from "@/components/site/Footer";
@@ -23,13 +25,14 @@ import { useCart } from "@/lib/cart";
 import { useAuth } from "@/lib/auth-client";
 import { inr } from "@/lib/utils";
 
-const DELIVERY_FEE = 40;
-
 type RazorpayResponse = {
   razorpay_payment_id: string;
   razorpay_order_id: string;
   razorpay_signature: string;
 };
+
+type Location = { id: string; name: string; area: string | null; deliveryFee: number };
+type Applied = { code: string; discount: number; label: string };
 
 declare global {
   interface Window {
@@ -53,7 +56,11 @@ export default function CheckoutPage() {
   const router = useRouter();
   const { items, setQty, remove, subtotal, clear, count } = useCart();
   const { user, loading: authLoading } = useAuth();
-  const [form, setForm] = useState({ name: "", phone: "", address: "", method: "razorpay" as "razorpay" | "cod" });
+  const [form, setForm] = useState({ name: "", phone: "", locationId: "", method: "razorpay" as "razorpay" | "cod" });
+  const [locations, setLocations] = useState<Location[]>([]);
+  const [couponInput, setCouponInput] = useState("");
+  const [applied, setApplied] = useState<Applied | null>(null);
+  const [couponBusy, setCouponBusy] = useState(false);
   const [placed, setPlaced] = useState<null | { id: string; total: number; method: string }>(null);
   const [busy, setBusy] = useState(false);
   const [store, setStore] = useState<{ accepting: boolean; message: string | null }>({ accepting: true, message: null });
@@ -62,6 +69,10 @@ export default function CheckoutPage() {
     fetch("/api/settings", { cache: "no-store" })
       .then((r) => r.json())
       .then((d) => setStore({ accepting: d.acceptingOrders, message: d.closedMessage }))
+      .catch(() => {});
+    fetch("/api/locations", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => setLocations(d.locations || []))
       .catch(() => {});
   }, []);
 
@@ -76,8 +87,44 @@ export default function CheckoutPage() {
     }
   }, [user]);
 
-  const total = subtotal + (subtotal > 0 ? DELIVERY_FEE : 0);
+  // If the cart changes, drop any applied coupon so the discount can't go stale.
+  useEffect(() => {
+    setApplied(null);
+  }, [subtotal]);
+
+  const selectedLocation = locations.find((l) => l.id === form.locationId) || null;
+  const deliveryFee = subtotal > 0 && selectedLocation ? selectedLocation.deliveryFee : 0;
+  const couponDiscount = applied?.discount ?? 0;
+  const total = Math.max(0, subtotal - couponDiscount) + deliveryFee;
   const isCustomer = user?.role === "customer";
+
+  async function applyCoupon() {
+    if (!couponInput.trim()) return;
+    if (!isCustomer) {
+      router.push("/login?next=/checkout");
+      return;
+    }
+    setCouponBusy(true);
+    try {
+      const res = await fetch("/api/coupons/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: couponInput.trim(), subtotal }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setApplied(null);
+        toast.error(data.error || "Invalid coupon");
+        return;
+      }
+      setApplied({ code: data.code, discount: data.discount, label: data.label });
+      toast.success(`Coupon ${data.code} applied — you saved ${inr(data.discount)}`);
+    } catch {
+      toast.error("Could not check that coupon");
+    } finally {
+      setCouponBusy(false);
+    }
+  }
 
   async function placeOrder(e: React.FormEvent) {
     e.preventDefault();
@@ -87,9 +134,8 @@ export default function CheckoutPage() {
       router.push("/login?next=/checkout");
       return;
     }
-    if (!form.name || !form.phone || !form.address) {
-      return toast.error("Please fill name, phone and address");
-    }
+    if (!form.name || !form.phone) return toast.error("Please fill your name and phone");
+    if (!form.locationId) return toast.error("Please choose a delivery location");
 
     setBusy(true);
     let modalOpened = false;
@@ -101,7 +147,8 @@ export default function CheckoutPage() {
           items: items.map((i) => ({ id: i.id, qty: i.qty })),
           name: form.name,
           phone: form.phone,
-          address: form.address,
+          deliveryLocationId: form.locationId,
+          couponCode: applied?.code,
           paymentMethod: form.method,
         }),
       });
@@ -114,7 +161,6 @@ export default function CheckoutPage() {
         throw new Error(data.error || "Could not place order");
       }
 
-      // Cash on delivery — done.
       if (data.paymentMethod === "cod") {
         setPlaced({ id: data.order.id, total: data.order.total, method: "cod" });
         clear();
@@ -122,7 +168,6 @@ export default function CheckoutPage() {
         return;
       }
 
-      // Online payment via Razorpay.
       const ok = await loadRazorpay();
       if (!ok || !window.Razorpay) throw new Error("Could not load payment gateway");
 
@@ -135,7 +180,7 @@ export default function CheckoutPage() {
         image: "/ela-logo.jpeg",
         order_id: data.razorpay.orderId,
         prefill: { name: form.name, contact: form.phone },
-        notes: { address: form.address },
+        notes: { location: selectedLocation?.name || "" },
         theme: { color: "#4B5A24" },
         handler: async (response: RazorpayResponse) => {
           try {
@@ -170,11 +215,10 @@ export default function CheckoutPage() {
       });
 
       modalOpened = true;
-      rzp.open(); // keep busy until handler/dismiss resolves
+      rzp.open();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Something went wrong");
     } finally {
-      // Reset unless the Razorpay modal is now open (its handlers reset busy).
       if (!modalOpened) setBusy(false);
     }
   }
@@ -282,7 +326,57 @@ export default function CheckoutPage() {
                 <div className="mt-4 space-y-3">
                   <Field label="Full name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} placeholder="Anjali Nair" />
                   <Field label="Phone (WhatsApp)" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} placeholder="+91 9XXXXXXXXX" type="tel" />
-                  <Field label="Delivery address" value={form.address} onChange={(v) => setForm({ ...form, address: v })} placeholder="Flat / Street / City / PIN" textarea />
+                  <label className="block">
+                    <div className="text-xs text-muted-foreground mb-1">Delivery location</div>
+                    <select
+                      value={form.locationId}
+                      onChange={(e) => setForm({ ...form, locationId: e.target.value })}
+                      className="w-full rounded-xl border border-input bg-background px-4 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-gold/60"
+                    >
+                      <option value="">Select your area…</option>
+                      {locations.map((l) => (
+                        <option key={l.id} value={l.id}>
+                          {l.name}{l.area ? ` — ${l.area}` : ""} ({l.deliveryFee > 0 ? inr(l.deliveryFee) : "Free"})
+                        </option>
+                      ))}
+                    </select>
+                    {locations.length === 0 && (
+                      <p className="mt-1 text-xs text-muted-foreground">No delivery areas configured yet.</p>
+                    )}
+                  </label>
+                </div>
+
+                {/* Coupon — immediately before payment (spec #13) */}
+                <div className="mt-5">
+                  <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground mb-2">Coupon</div>
+                  {applied ? (
+                    <div className="flex items-center justify-between gap-2 rounded-xl border border-forest/40 bg-forest/5 px-3 py-2.5 text-sm">
+                      <span className="inline-flex items-center gap-2 text-forest">
+                        <TicketPercent className="h-4 w-4" />
+                        <strong className="font-mono">{applied.code}</strong> · {applied.label}
+                      </span>
+                      <button type="button" onClick={() => setApplied(null)} className="text-muted-foreground hover:text-destructive" aria-label="Remove coupon">
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2">
+                      <input
+                        value={couponInput}
+                        onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                        placeholder="Coupon code"
+                        className="flex-1 rounded-xl border border-input bg-background px-4 py-2.5 text-sm font-mono uppercase placeholder:font-sans placeholder:normal-case placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-gold/60"
+                      />
+                      <button
+                        type="button"
+                        onClick={applyCoupon}
+                        disabled={couponBusy || !couponInput.trim()}
+                        className="rounded-xl border border-border px-4 py-2.5 text-sm font-medium hover:bg-muted disabled:opacity-50"
+                      >
+                        {couponBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Apply"}
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 <div className="mt-5">
@@ -298,7 +392,8 @@ export default function CheckoutPage() {
                 <h2 className="font-serif text-2xl text-foreground">Order summary</h2>
                 <dl className="mt-4 space-y-2 text-sm">
                   <Row label="Subtotal" value={inr(subtotal)} />
-                  <Row label="Delivery" value={subtotal > 0 ? inr(DELIVERY_FEE) : "—"} />
+                  {applied && <Row label={`Coupon (${applied.code})`} value={`- ${inr(couponDiscount)}`} green />}
+                  <Row label="Delivery" value={subtotal > 0 ? (selectedLocation ? (deliveryFee > 0 ? inr(deliveryFee) : "Free") : "Select area") : "—"} />
                   <div className="h-px bg-border my-3" />
                   <Row label="Total" value={inr(total)} bold />
                 </dl>
@@ -359,34 +454,28 @@ function Field({
   onChange,
   placeholder,
   type = "text",
-  textarea,
 }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   type?: string;
-  textarea?: boolean;
 }) {
   const cls =
     "w-full rounded-xl border border-input bg-background px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-gold/60";
   return (
     <label className="block">
       <div className="text-xs text-muted-foreground mb-1">{label}</div>
-      {textarea ? (
-        <textarea rows={2} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className={cls} />
-      ) : (
-        <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className={cls} />
-      )}
+      <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} className={cls} />
     </label>
   );
 }
 
-function Row({ label, value, bold }: { label: string; value: string; bold?: boolean }) {
+function Row({ label, value, bold, green }: { label: string; value: string; bold?: boolean; green?: boolean }) {
   return (
     <div className="flex items-center justify-between">
-      <dt className={bold ? "font-serif text-lg text-foreground" : "text-muted-foreground"}>{label}</dt>
-      <dd className={bold ? "font-serif text-lg text-foreground" : "text-foreground"}>{value}</dd>
+      <dt className={bold ? "font-serif text-lg text-foreground" : green ? "text-forest" : "text-muted-foreground"}>{label}</dt>
+      <dd className={bold ? "font-serif text-lg text-foreground" : green ? "text-forest" : "text-foreground"}>{value}</dd>
     </div>
   );
 }
