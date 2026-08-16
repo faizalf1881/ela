@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { RefreshCw, ShoppingBag, LogOut, ArrowRight, FileText, RotateCcw, Check, CircleDot } from "lucide-react";
+import { RefreshCw, ShoppingBag, LogOut, ArrowRight, FileText, RotateCcw, Check, CircleDot, LifeBuoy } from "lucide-react";
 import { Navbar } from "@/components/site/Navbar";
 import { Footer, WhatsAppFab } from "@/components/site/Footer";
 import { useAuth } from "@/lib/auth-client";
@@ -65,6 +65,9 @@ export default function OrdersPage() {
               {user?.name && <p className="mt-2 text-muted-foreground">Signed in as {user.name}</p>}
             </div>
             <div className="flex gap-2">
+              <Link href="/support" className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2 text-sm hover:bg-muted">
+                <LifeBuoy className="h-4 w-4" /> Help
+              </Link>
               <button onClick={() => load()} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2 text-sm hover:bg-muted">
                 <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} /> Refresh
               </button>

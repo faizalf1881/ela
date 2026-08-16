@@ -37,6 +37,17 @@ export async function notifyOrderStatus(o: NotifyOrder): Promise<void> {
   }
 }
 
+/** Support-ticket notification to a customer (registered / replied / resolved). Never throws. */
+export async function notifyTicket(customerPhone: string, body: string): Promise<void> {
+  const phone = normalizePhone(customerPhone);
+  if (!phone) return;
+  try {
+    await sendWhatsAppText(phone, body);
+  } catch {
+    /* best-effort */
+  }
+}
+
 /** Notify the restaurant owner of a new order (if ADMIN_NOTIFY_PHONE is set). */
 export async function notifyNewOrderToAdmin(o: NotifyOrder): Promise<void> {
   const admin = normalizePhone(process.env.ADMIN_NOTIFY_PHONE || "");

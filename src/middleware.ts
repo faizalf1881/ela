@@ -28,15 +28,20 @@ export async function middleware(req: NextRequest) {
     return NextResponse.redirect(url);
   };
 
+  const isStaff = role === "admin" || role === "kitchen";
+  // Staff open invoices and delivery labels for any order; each page re-checks ownership.
+  const staffViewableOrderDoc = /^\/orders\/[^/]+\/(invoice|label)$/.test(pathname);
+
   if (pathname.startsWith("/admin")) {
     if (role !== "admin") return deny("/staff/login");
   } else if (pathname.startsWith("/kitchen")) {
-    if (role !== "kitchen" && role !== "admin") return deny("/staff/login");
-  } else if (pathname.startsWith("/orders")) {
+    if (!isStaff) return deny("/staff/login");
+  } else if (pathname.startsWith("/orders") || pathname.startsWith("/support")) {
+    if (staffViewableOrderDoc && isStaff) return NextResponse.next();
     if (role !== "customer") {
       const url = req.nextUrl.clone();
       url.pathname = "/login";
-      url.search = "?next=/orders";
+      url.search = `?next=${pathname}`;
       return NextResponse.redirect(url);
     }
   }
@@ -45,5 +50,5 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/admin/:path*", "/kitchen/:path*", "/orders/:path*"],
+  matcher: ["/admin/:path*", "/kitchen/:path*", "/orders/:path*", "/support/:path*"],
 };
