@@ -254,6 +254,7 @@ model Ticket {
   order         Order?       @relation(fields: [orderId], references: [id])
   orderId       String?
   status        TicketStatus @default(OPEN)
+  assignedToId  String? // StaffUser id handling this ticket
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
@@ -342,8 +343,23 @@ model TicketMessage {
   authorType  String // customer | staff | system
   authorLabel String?
   body        String
+  attachments String[] // media URLs (/api/media/<id>)
   internal    Boolean  @default(false) // admin-only internal note (hidden from customer)
   createdAt   DateTime @default(now())
 
   @@index([ticketId])
+}
+
+/// Uploaded files (menu photos, complaint attachments) stored in Postgres so the
+/// app needs no external object store. Kept small by a strict per-file size cap.
+model MediaAsset {
+  id        String   @id @default(cuid())
+  filename  String
+  mimeType  String
+  size      Int // bytes
+  kind      String // menu | ticket
+  data      Bytes
+  createdAt DateTime @default(now())
+
+  @@index([kind])
 }

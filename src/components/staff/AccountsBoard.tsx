@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Plus, X, Save, Loader2, Download, FileText, Trash2, Search } from "lucide-react";
+import { Plus, X, Save, Loader2, Download, FileText, Trash2, Search, Crown } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
+import { ExportMenu } from "@/components/staff/ExportMenu";
 
 type Invoice = {
   id: string;
@@ -19,6 +20,7 @@ type Invoice = {
   paymentType: string;
   items: string;
   itemCount: number;
+  kind: "order" | "subscription";
 };
 
 type Summary = { count: number; total: number; paid: number };
@@ -78,6 +80,7 @@ export function AccountsBoard() {
         Method: METHOD_LABEL[i.paymentMethod] || i.paymentMethod,
         Type: i.paymentType,
         Status: STATUS_LABEL[i.paymentStatus] || i.paymentStatus,
+        Source: i.kind === "subscription" ? "Membership" : "Order",
       })),
     );
   }
@@ -90,9 +93,10 @@ export function AccountsBoard() {
           <p className="text-sm text-muted-foreground">Every invoice generated across the platform. Filter, export, or create a manual invoice.</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2.5 text-sm hover:bg-muted">
-            <Download className="h-4 w-4" /> Export CSV
+          <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2.5 text-sm hover:bg-muted" title="Export exactly what the filters show">
+            <Download className="h-4 w-4" /> Filtered CSV
           </button>
+          <ExportMenu type="invoices" label="Export all" />
           <button onClick={() => setCreating(true)} className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90">
             <Plus className="h-4 w-4" /> New invoice
           </button>
@@ -164,9 +168,15 @@ export function AccountsBoard() {
                     <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_CLS[i.paymentStatus]}`}>{STATUS_LABEL[i.paymentStatus]}</span>
                   </td>
                   <td className="px-4 py-3 text-right">
-                    <Link href={`/orders/${i.id}/invoice`} target="_blank" className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs hover:bg-muted">
-                      <FileText className="h-3.5 w-3.5" /> View
-                    </Link>
+                    {i.kind === "order" ? (
+                      <Link href={`/orders/${i.id}/invoice`} target="_blank" className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs hover:bg-muted">
+                        <FileText className="h-3.5 w-3.5" /> View
+                      </Link>
+                    ) : (
+                      <Link href="/admin/memberships" className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs hover:bg-muted">
+                        <Crown className="h-3.5 w-3.5" /> Membership
+                      </Link>
+                    )}
                   </td>
                 </tr>
               ))

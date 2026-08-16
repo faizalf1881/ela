@@ -8,6 +8,7 @@ import { LifeBuoy, Plus, Send, Loader2, X, MessageSquare } from "lucide-react";
 import { Navbar } from "@/components/site/Navbar";
 import { Footer, WhatsAppFab } from "@/components/site/Footer";
 import { useAuth } from "@/lib/auth-client";
+import { FileUpload, Attachments, type UploadedFile } from "@/components/site/FileUpload";
 
 const CATEGORIES = [
   "Order Issue",
@@ -20,7 +21,7 @@ const CATEGORIES = [
   "Other",
 ];
 
-type Msg = { id: string; authorType: string; authorLabel: string | null; body: string; createdAt: string };
+type Msg = { id: string; authorType: string; authorLabel: string | null; body: string; attachments: string[]; createdAt: string };
 type Ticket = {
   id: string;
   ticketNo: string;
@@ -136,6 +137,7 @@ function NewTicket({ onClose, onCreated }: { onClose: () => void; onCreated: () 
   const [body, setBody] = useState("");
   const [orderId, setOrderId] = useState("");
   const [orders, setOrders] = useState<{ id: string; invoiceNo: string | null }[]>([]);
+  const [attachments, setAttachments] = useState<UploadedFile[]>([]);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -152,7 +154,13 @@ function NewTicket({ onClose, onCreated }: { onClose: () => void; onCreated: () 
       const res = await fetch("/api/tickets", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ category, subject: subject.trim(), body: body.trim(), orderId: orderId || undefined }),
+        body: JSON.stringify({
+          category,
+          subject: subject.trim(),
+          body: body.trim(),
+          orderId: orderId || undefined,
+          attachments: attachments.map((a) => a.url),
+        }),
       });
       if (!res.ok) throw new Error((await res.json()).error || "Could not submit");
       toast.success("Complaint registered — we'll be in touch");
@@ -193,6 +201,7 @@ function NewTicket({ onClose, onCreated }: { onClose: () => void; onCreated: () 
             <span className="text-xs text-muted-foreground">Describe the issue</span>
             <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} className="mt-1 w-full rounded-xl border border-input bg-background px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
           </label>
+          <FileUpload files={attachments} onChange={setAttachments} disabled={saving} label="Attach photo or document (optional)" />
         </div>
         <div className="mt-6 flex gap-3">
           <button onClick={submit} disabled={saving} className="flex-1 inline-flex items-center justify-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60">
@@ -207,6 +216,7 @@ function NewTicket({ onClose, onCreated }: { onClose: () => void; onCreated: () 
 
 function TicketThread({ ticket, onClose, onReplied }: { ticket: Ticket; onClose: () => void; onReplied: () => void }) {
   const [reply, setReply] = useState("");
+  const [attachments, setAttachments] = useState<UploadedFile[]>([]);
   const [sending, setSending] = useState(false);
   const closed = ticket.status === "CLOSED";
 
@@ -217,10 +227,11 @@ function TicketThread({ ticket, onClose, onReplied }: { ticket: Ticket; onClose:
       const res = await fetch(`/api/tickets/${ticket.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: reply.trim() }),
+        body: JSON.stringify({ message: reply.trim(), attachments: attachments.map((a) => a.url) }),
       });
       if (!res.ok) throw new Error((await res.json()).error || "Could not send");
       setReply("");
+      setAttachments([]);
       onReplied();
       toast.success("Reply sent");
     } catch (err) {
@@ -250,6 +261,7 @@ function TicketThread({ ticket, onClose, onReplied }: { ticket: Ticket; onClose:
                 {m.authorType === "customer" ? "You" : "Ela & Co. Support"} · {new Date(m.createdAt).toLocaleString("en-IN")}
               </div>
               <div className="mt-1 text-foreground whitespace-pre-wrap">{m.body}</div>
+              <Attachments urls={m.attachments} />
             </div>
           ))}
         </div>
@@ -257,17 +269,20 @@ function TicketThread({ ticket, onClose, onReplied }: { ticket: Ticket; onClose:
         {closed ? (
           <div className="mt-4 rounded-xl bg-muted px-4 py-3 text-sm text-muted-foreground text-center">This complaint is closed.</div>
         ) : (
-          <div className="mt-4 flex gap-2">
-            <input
-              value={reply}
-              onChange={(e) => setReply(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
-              placeholder="Write a reply…"
-              className="flex-1 rounded-xl border border-input bg-background px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60"
-            />
-            <button onClick={send} disabled={sending || !reply.trim()} className="rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
-              {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-            </button>
+          <div className="mt-4 space-y-2">
+            <div className="flex gap-2">
+              <input
+                value={reply}
+                onChange={(e) => setReply(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
+                placeholder="Write a reply…"
+                className="flex-1 rounded-xl border border-input bg-background px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60"
+              />
+              <button onClick={send} disabled={sending || !reply.trim()} className="rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
+                {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+              </button>
+            </div>
+            <FileUpload files={attachments} onChange={setAttachments} disabled={sending} label="Attach" />
           </div>
         )}
       </div>

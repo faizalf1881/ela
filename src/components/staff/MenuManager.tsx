@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Image from "next/image";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Eye, EyeOff, X, Save, Loader2 } from "lucide-react";
+import { Plus, Pencil, Trash2, Eye, EyeOff, X, Save, Loader2, Upload, Image as ImageIcon } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { effectivePrice } from "@/lib/pricing";
 
@@ -237,7 +237,7 @@ export function MenuManager() {
                 </label>
                 <Input label="Sort order" type="number" value={String(draft.sortOrder)} onChange={(v) => setDraft({ ...draft, sortOrder: Number(v) })} />
               </div>
-              <Input label="Image URL (optional)" value={draft.imageUrl} onChange={(v) => setDraft({ ...draft, imageUrl: v })} placeholder="/menu/veg.jpg or https://…" />
+              <ImageField value={draft.imageUrl} onChange={(v) => setDraft({ ...draft, imageUrl: v })} />
               <label className="flex items-center gap-2 text-sm text-foreground">
                 <input type="checkbox" checked={draft.available} onChange={(e) => setDraft({ ...draft, available: e.target.checked })} className="h-4 w-4" />
                 Visible to customers
@@ -253,6 +253,77 @@ export function MenuManager() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Dish photo: upload straight from the device, or paste a link. */
+function ImageField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [uploading, setUploading] = useState(false);
+
+  async function upload(file: File) {
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("kind", "menu");
+      fd.append("file", file);
+      const res = await fetch("/api/uploads", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Upload failed");
+      onChange(data.files[0].url);
+      toast.success("Photo uploaded");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <div>
+      <span className="text-xs text-muted-foreground">Dish photo</span>
+      <div className="mt-1 flex items-center gap-3">
+        <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-xl bg-muted ring-1 ring-border">
+          {value ? (
+            <Image src={value} alt="Dish" fill sizes="64px" className="object-cover" />
+          ) : (
+            <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+              <ImageIcon className="h-5 w-5" />
+            </div>
+          )}
+        </div>
+        <div className="flex-1 space-y-2">
+          <div className="flex gap-2">
+            <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs hover:bg-muted">
+              {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+              {uploading ? "Uploading…" : "Upload photo"}
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp,image/gif"
+                className="hidden"
+                disabled={uploading}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) upload(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+            {value && (
+              <button type="button" onClick={() => onChange("")} className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs text-destructive hover:bg-destructive/10">
+                <X className="h-3.5 w-3.5" /> Remove
+              </button>
+            )}
+          </div>
+          <input
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder="…or paste an image link"
+            className="w-full rounded-xl border border-input bg-background px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-gold/60"
+          />
+        </div>
+      </div>
+      <p className="mt-1 text-[11px] text-muted-foreground">JPG, PNG, WEBP or GIF · up to 2 MB</p>
     </div>
   );
 }

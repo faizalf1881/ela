@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Search, Loader2, Send, X, LifeBuoy, Lock, Download } from "lucide-react";
+import { Search, Loader2, Send, X, LifeBuoy, Lock, Download, UserCog } from "lucide-react";
 import { downloadCsv } from "@/lib/export";
+import { ExportMenu } from "@/components/staff/ExportMenu";
+import { FileUpload, Attachments, type UploadedFile } from "@/components/site/FileUpload";
 
 const CATEGORIES = ["Order Issue", "Payment Issue", "Delivery Issue", "Refund Request", "Subscription Issue", "Technical Issue", "Feedback", "Other"];
 const STATUSES = ["OPEN", "IN_PROGRESS", "WAITING_CUSTOMER", "RESOLVED", "CLOSED"] as const;
@@ -24,7 +26,8 @@ const STATUS_CLS: Record<string, string> = {
   CLOSED: "bg-muted text-muted-foreground",
 };
 
-type Msg = { id: string; authorType: string; authorLabel: string | null; body: string; internal: boolean; createdAt: string };
+type Msg = { id: string; authorType: string; authorLabel: string | null; body: string; attachments: string[]; internal: boolean; createdAt: string };
+type Staff = { id: string; username: string; name: string | null; role: string };
 type Ticket = {
   id: string;
   ticketNo: string;
@@ -35,15 +38,24 @@ type Ticket = {
   status: string;
   createdAt: string;
   orderId: string | null;
+  assignedToId: string | null;
   order: { id: string; invoiceNo: string | null; total: number } | null;
   messages: Msg[];
 };
 
 export function ComplaintsBoard() {
   const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [staff, setStaff] = useState<Staff[]>([]);
   const [loading, setLoading] = useState(true);
   const [f, setF] = useState({ status: "", category: "", q: "" });
   const [open, setOpen] = useState<Ticket | null>(null);
+
+  useEffect(() => {
+    fetch("/api/staff", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : { staff: [] }))
+      .then((d) => setStaff(d.staff || d.users || []))
+      .catch(() => {});
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -95,9 +107,12 @@ export function ComplaintsBoard() {
           <h1 className="font-serif text-3xl text-foreground">Support</h1>
           <p className="text-sm text-muted-foreground">Customer complaints and support tickets. {openCount > 0 && <span className="text-gold font-medium">{openCount} needing attention.</span>}</p>
         </div>
-        <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2.5 text-sm hover:bg-muted">
-          <Download className="h-4 w-4" /> Export
-        </button>
+        <div className="flex gap-2">
+          <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2.5 text-sm hover:bg-muted" title="Export exactly what the filters show">
+            <Download className="h-4 w-4" /> Filtered CSV
+          </button>
+          <ExportMenu type="complaints" label="Export all" />
+        </div>
       </div>
 
       <div className="mt-6 flex flex-wrap items-end gap-3">
@@ -151,14 +166,15 @@ export function ComplaintsBoard() {
         )}
       </div>
 
-      {open && <TicketDetail ticket={open} onClose={() => setOpen(null)} onChanged={load} />}
+      {open && <TicketDetail ticket={open} staff={staff} onClose={() => setOpen(null)} onChanged={load} />}
     </div>
   );
 }
 
-function TicketDetail({ ticket, onClose, onChanged }: { ticket: Ticket; onClose: () => void; onChanged: () => void }) {
+function TicketDetail({ ticket, staff, onClose, onChanged }: { ticket: Ticket; staff: Staff[]; onClose: () => void; onChanged: () => void }) {
   const [reply, setReply] = useState("");
   const [internal, setInternal] = useState(false);
+  const [attachments, setAttachments] = useState<UploadedFile[]>([]);
   const [sending, setSending] = useState(false);
 
   async function patch(payload: Record<string, unknown>) {
@@ -174,8 +190,9 @@ function TicketDetail({ ticket, onClose, onChanged }: { ticket: Ticket; onClose:
     if (!reply.trim()) return;
     setSending(true);
     try {
-      await patch({ message: reply.trim(), internal });
+      await patch({ message: reply.trim(), internal, attachments: attachments.map((a) => a.url) });
       setReply("");
+      setAttachments([]);
       onChanged();
       toast.success(internal ? "Internal note added" : "Reply sent to customer");
     } catch (err) {
@@ -226,6 +243,28 @@ function TicketDetail({ ticket, onClose, onChanged }: { ticket: Ticket; onClose:
               </button>
             ))}
           </div>
+
+          <label className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+            <UserCog className="h-3.5 w-3.5" /> Assigned to
+            <select
+              value={ticket.assignedToId || ""}
+              onChange={async (e) => {
+                try {
+                  await patch({ assignedToId: e.target.value || null });
+                  onChanged();
+                  toast.success(e.target.value ? "Ticket assigned" : "Assignment cleared");
+                } catch {
+                  toast.error("Could not assign");
+                }
+              }}
+              className="rounded-lg border border-input bg-background px-2 py-1 text-xs text-foreground"
+            >
+              <option value="">Unassigned</option>
+              {staff.map((st) => (
+                <option key={st.id} value={st.id}>{st.name || st.username}</option>
+              ))}
+            </select>
+          </label>
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
@@ -241,6 +280,7 @@ function TicketDetail({ ticket, onClose, onChanged }: { ticket: Ticket; onClose:
                 {m.internal ? "Internal note" : m.authorType === "customer" ? m.authorLabel || "Customer" : `Support (${m.authorLabel || "staff"})`} · {new Date(m.createdAt).toLocaleString("en-IN")}
               </div>
               <div className="mt-1 text-foreground whitespace-pre-wrap">{m.body}</div>
+              <Attachments urls={m.attachments} />
             </div>
           ))}
         </div>
@@ -250,6 +290,9 @@ function TicketDetail({ ticket, onClose, onChanged }: { ticket: Ticket; onClose:
             <input type="checkbox" checked={internal} onChange={(e) => setInternal(e.target.checked)} className="h-3.5 w-3.5" />
             Internal note (not visible to the customer)
           </label>
+          <div className="mb-2">
+            <FileUpload files={attachments} onChange={setAttachments} disabled={sending} label="Attach" />
+          </div>
           <div className="flex gap-2">
             <input
               value={reply}

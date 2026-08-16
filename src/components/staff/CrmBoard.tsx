@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { Search, Download, X, Save, Loader2, Phone, MapPin, Calendar, ShoppingBag, Wallet, Crown } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
+import { ExportMenu } from "@/components/staff/ExportMenu";
 import { STATUS_LABEL, type OrderStatus } from "@/lib/order-status";
 
 type OrderLite = {
@@ -99,9 +100,10 @@ export function CrmBoard() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Name or phone" className="w-56 rounded-full border border-input bg-background pl-9 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
           </label>
-          <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2.5 text-sm hover:bg-muted">
-            <Download className="h-4 w-4" /> Export
+          <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2.5 text-sm hover:bg-muted" title="Export exactly what the search shows">
+            <Download className="h-4 w-4" /> Filtered CSV
           </button>
+          <ExportMenu type="customers" label="Export all" />
         </div>
       </div>
 

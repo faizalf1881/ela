@@ -41,7 +41,22 @@ export async function GET(req: Request) {
     take: 500,
   });
 
-  const invoices = orders.map((o) => ({
+  type InvoiceRow = {
+    id: string;
+    invoiceNo: string | null;
+    createdAt: Date;
+    customerName: string;
+    customerPhone: string;
+    total: number;
+    paymentMethod: string;
+    paymentStatus: string;
+    paymentType: string;
+    items: string;
+    itemCount: number;
+    kind: "order" | "subscription";
+  };
+
+  let invoices: InvoiceRow[] = orders.map((o) => ({
     id: o.id,
     invoiceNo: o.invoiceNo,
     createdAt: o.createdAt,
@@ -53,7 +68,48 @@ export async function GET(req: Request) {
     paymentType: o.source === "manual" ? "Manual" : "One-Time",
     items: o.items.map((i) => `${i.name} × ${i.qty}`).join(", "),
     itemCount: o.items.reduce((n, i) => n + i.qty, 0),
+    kind: "order",
   }));
+
+  // Membership charges are money in too — surface them alongside order invoices
+  // so Accounts reconciles to everything the business collected.
+  const wantsSubs = !method || method === "razorpay";
+  const wantsPaid = !status || status === "PAID";
+  if (wantsSubs && wantsPaid) {
+    const charges = await prisma.subscriptionCharge.findMany({
+      where: {
+        ...(from || to
+          ? { paidAt: { ...(from ? { gte: new Date(from) } : {}), ...(to ? { lte: new Date(`${to}T23:59:59`) } : {}) } }
+          : {}),
+      },
+      include: { subscription: { include: { customer: true, plan: true } } },
+      orderBy: { paidAt: "desc" },
+      take: 500,
+    });
+
+    const subRows: InvoiceRow[] = charges
+      .filter((c) => {
+        if (!q) return true;
+        const hay = `${c.subscription.customer.name ?? ""} ${c.subscription.customer.phone} ${c.subscription.plan.name}`.toLowerCase();
+        return hay.includes(q.toLowerCase());
+      })
+      .map((c) => ({
+        id: c.subscriptionId,
+        invoiceNo: `SUB-${c.id.slice(-6).toUpperCase()}`,
+        createdAt: c.paidAt,
+        customerName: c.subscription.customer.name ?? "Member",
+        customerPhone: c.subscription.customer.phone,
+        total: c.amount,
+        paymentMethod: "razorpay",
+        paymentStatus: "PAID",
+        paymentType: "Subscription",
+        items: `${c.subscription.plan.name} membership`,
+        itemCount: 1,
+        kind: "subscription",
+      }));
+
+    invoices = [...invoices, ...subRows].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
 
   const summary = {
     count: invoices.length,

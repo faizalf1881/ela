@@ -92,6 +92,13 @@ class Client {
     }
     return res;
   }
+
+  /** Same as fetch() but never forces a content-type — required for FormData uploads. */
+  async fetchRaw(pathname: string, opts: RequestInit = {}) {
+    const headers = new Headers(opts.headers);
+    if (this.cookie) headers.set("cookie", this.cookie);
+    return fetch(BASE + pathname, { ...opts, headers, redirect: "manual" });
+  }
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -506,6 +513,101 @@ async function main() {
   const tId = (await throwaway.json()).plan.id;
   const tDel = await admin.fetch(`/api/plans/${tId}`, { method: "DELETE" });
   ok(tDel.status === 200 && (await tDel.json()).ok === true, "unused plan is hard-deleted");
+
+  // ---------- Uploads (menu photos + complaint attachments) ----------
+  section("File uploads");
+  // 1x1 transparent PNG
+  const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  const pngBlob = new Blob([new Uint8Array(PNG)], { type: "image/png" });
+
+  const menuFd = new FormData();
+  menuFd.append("kind", "menu");
+  menuFd.append("file", pngBlob, "dish.png");
+  const upMenu = await admin.fetchRaw("/api/uploads", { method: "POST", body: menuFd });
+  const upMenuJson = await upMenu.json();
+  ok(upMenu.status === 201, `admin uploads dish photo → 201 ${upMenu.status !== 201 ? JSON.stringify(upMenuJson) : ""}`);
+  const menuUrl: string = upMenuJson.files?.[0]?.url ?? "";
+  ok(/^\/api\/media\//.test(menuUrl), "upload returns a media URL");
+
+  const publicImg = await new Client().fetch(menuUrl);
+  ok(publicImg.status === 200 && publicImg.headers.get("content-type") === "image/png", "menu photo is publicly served");
+
+  const custMenuFd = new FormData();
+  custMenuFd.append("kind", "menu");
+  custMenuFd.append("file", pngBlob, "x.png");
+  const custMenuUp = await customer.fetchRaw("/api/uploads", { method: "POST", body: custMenuFd });
+  ok(custMenuUp.status === 403, "customer cannot upload menu photos → 403");
+
+  const badFd = new FormData();
+  badFd.append("kind", "menu");
+  badFd.append("file", new Blob([new Uint8Array([1, 2, 3])], { type: "application/zip" }), "bad.zip");
+  const badUp = await admin.fetchRaw("/api/uploads", { method: "POST", body: badFd });
+  ok(badUp.status === 415, "disallowed file type rejected → 415");
+
+  // Attach a photo to a complaint, then check privacy.
+  const tFd = new FormData();
+  tFd.append("kind", "ticket");
+  tFd.append("file", pngBlob, "evidence.png");
+  const upTicket = await customer.fetchRaw("/api/uploads", { method: "POST", body: tFd });
+  const ticketUrl: string = (await upTicket.json()).files?.[0]?.url ?? "";
+  ok(upTicket.status === 201 && !!ticketUrl, "customer uploads complaint evidence → 201");
+
+  const anonMedia = await new Client().fetch(ticketUrl);
+  ok(anonMedia.status === 401, "complaint attachment is private to anonymous → 401");
+
+  const tWithFile = await customer.fetch("/api/tickets", {
+    method: "POST",
+    body: JSON.stringify({ category: "Delivery Issue", subject: "Attachment test", body: "Photo attached.", attachments: [ticketUrl] }),
+  });
+  const twf = await tWithFile.json();
+  ok(tWithFile.status === 201, "complaint created with attachment");
+  ok(twf.ticket?.messages?.[0]?.attachments?.[0] === ticketUrl, "attachment stored on the message");
+
+  const ownerMedia = await customer.fetch(ticketUrl);
+  ok(ownerMedia.status === 200, "owner can open their own attachment");
+  const staffMedia = await admin.fetch(ticketUrl);
+  ok(staffMedia.status === 200, "staff can open complaint attachments");
+
+  // ---------- Ticket assignment ----------
+  section("Ticket assignment");
+  const staffList = await (await admin.fetch("/api/staff")).json();
+  const assignee = staffList.staff?.[0];
+  ok(!!assignee, "kitchen staff available to assign");
+  const assign = await admin.fetch(`/api/tickets/${ticketId}`, { method: "PATCH", body: JSON.stringify({ assignedToId: assignee.id }) });
+  ok(assign.status === 200 && (await assign.json()).ticket?.assignedToId === assignee.id, "admin assigns ticket to staff");
+  const custAssign = await customer.fetch(`/api/tickets/${ticketId}`, { method: "PATCH", body: JSON.stringify({ assignedToId: assignee.id }) });
+  ok(custAssign.status === 403, "customer cannot assign tickets → 403");
+
+  // ---------- Reports: Excel / CSV / PDF ----------
+  section("Reports & exports");
+  for (const t of ["orders", "invoices", "customers", "subscriptions", "complaints", "analytics", "menu", "coupons"]) {
+    const xr = await admin.fetch(`/api/admin/export?type=${t}&format=xlsx`);
+    const ct = xr.headers.get("content-type") || "";
+    ok(xr.status === 200 && ct.includes("spreadsheetml"), `${t}: Excel export → 200 xlsx`);
+  }
+  const xlsxBody = await (await admin.fetch("/api/admin/export?type=orders&format=xlsx")).arrayBuffer();
+  const sig = Buffer.from(xlsxBody.slice(0, 2)).toString("hex");
+  ok(sig === "504b" && xlsxBody.byteLength > 1000, `xlsx is a real workbook (${xlsxBody.byteLength} bytes)`);
+
+  const csvRes = await admin.fetch("/api/admin/export?type=invoices&format=csv");
+  const csvText = await csvRes.text();
+  ok(csvRes.status === 200 && csvText.includes("Invoice"), "CSV export returns data");
+  ok((csvRes.headers.get("content-disposition") || "").includes(".csv"), "CSV downloads as a file");
+
+  const badReport = await admin.fetch("/api/admin/export?type=nonsense&format=csv");
+  ok(badReport.status === 400, "unknown report type → 400");
+  const custReport = await customer.fetch("/api/admin/export?type=orders&format=csv");
+  ok(custReport.status === 403, "exports are admin-only → 403");
+
+  const pdfView = await admin.fetch("/admin/reports/analytics");
+  ok(pdfView.status === 200, "PDF/print report view renders (analytics)");
+
+  // Subscription charges must surface in Accounts as "Subscription".
+  const accWithSubs = await (await admin.fetch("/api/admin/accounts")).json();
+  ok(
+    accWithSubs.invoices.some((i: { paymentType: string }) => i.paymentType === "Subscription"),
+    "membership charges appear in Accounts as Subscription",
+  );
 
   // ---------- Audit trail ----------
   section("Audit trail");

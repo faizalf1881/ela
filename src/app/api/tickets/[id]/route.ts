@@ -11,6 +11,8 @@ const patchSchema = z.object({
   message: z.string().trim().min(1).max(4000).optional(),
   internal: z.boolean().optional().default(false),
   status: z.enum(TICKET_STATUSES).optional(),
+  attachments: z.array(z.string().regex(/^\/api\/media\/[A-Za-z0-9_-]+$/)).max(3).optional().default([]),
+  assignedToId: z.string().trim().max(60).nullable().optional(),
 });
 
 const STATUS_TEXT: Record<string, string> = {
@@ -29,7 +31,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const { id } = await params;
   const parsed = patchSchema.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return NextResponse.json({ error: "Invalid data" }, { status: 400 });
-  const { message, internal, status } = parsed.data;
+  const { message, internal, status, attachments, assignedToId } = parsed.data;
 
   const ticket = await prisma.ticket.findUnique({ where: { id } });
   if (!ticket) return NextResponse.json({ error: "Ticket not found" }, { status: 404 });
@@ -38,8 +40,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (!isStaff && ticket.customerId !== s.sub) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
-  // Customers may reply but never set status or write internal notes.
-  if (!isStaff && (status || internal)) {
+  // Customers may reply but never set status, assign staff, or write internal notes.
+  if (!isStaff && (status || internal || assignedToId !== undefined)) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
@@ -50,13 +52,15 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
         authorType: isStaff ? "staff" : "customer",
         authorLabel: isStaff ? s.username || "Support" : ticket.customerName,
         body: message,
+        attachments,
         internal: isStaff ? Boolean(internal) : false,
       },
     });
   }
 
-  const data: { status?: (typeof TICKET_STATUSES)[number]; updatedAt: Date } = { updatedAt: new Date() };
+  const data: { status?: (typeof TICKET_STATUSES)[number]; assignedToId?: string | null; updatedAt: Date } = { updatedAt: new Date() };
   if (status) data.status = status;
+  if (assignedToId !== undefined) data.assignedToId = assignedToId || null;
   // A customer reply on a waiting ticket moves it back into the queue.
   else if (!isStaff && ticket.status === "WAITING_CUSTOMER") data.status = "OPEN";
 

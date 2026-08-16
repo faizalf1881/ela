@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { Plus, Pencil, Trash2, Eye, EyeOff, X, Save, Loader2, Crown, AlertTriangle, Download, Users } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
+import { ExportMenu } from "@/components/staff/ExportMenu";
 
 type Plan = {
   id: string;
@@ -168,8 +169,9 @@ export function PlanManager() {
         </div>
         <div className="flex gap-2">
           <button onClick={exportSubs} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2.5 text-sm hover:bg-muted">
-            <Download className="h-4 w-4" /> Export
+            <Download className="h-4 w-4" /> Quick CSV
           </button>
+          <ExportMenu type="subscriptions" label="Export all" />
           <button onClick={() => setDraft({ ...BLANK, sortOrder: String(plans.length + 1) })} className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90">
             <Plus className="h-4 w-4" /> New plan
           </button>

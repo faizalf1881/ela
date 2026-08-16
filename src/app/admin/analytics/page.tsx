@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { TrendingUp, ShoppingBag, Utensils, IndianRupee, TicketPercent, RefreshCw } from "lucide-react";
 import { StaffShell } from "@/components/staff/StaffShell";
 import { SalesBars, RankBars } from "@/components/staff/Charts";
+import { ExportMenu } from "@/components/staff/ExportMenu";
 import { inr } from "@/lib/utils";
 import { STATUS_LABEL, STATUS_BADGE, type OrderStatus } from "@/lib/order-status";
 
@@ -60,6 +61,7 @@ export default function AnalyticsPage() {
               </button>
             ))}
           </div>
+          <ExportMenu type="analytics" label="Export" />
           <button onClick={() => load(range)} className="inline-flex items-center gap-2 rounded-full border border-border px-3 py-2 text-sm hover:bg-muted">
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
           </button>

@@ -24,7 +24,8 @@ Cormorant Garamond).
 - **Coupon codes** applied at checkout with instant discount preview
 - Razorpay online payment (UPI/cards/wallets) **or** Cash on Delivery
 - Order history with live status + **printable invoice** (sequential invoice numbers)
-- **Help & complaints portal** (`/support`) — raise a ticket, track status, reply in-thread
+- **Help & complaints portal** (`/support`) — raise a ticket **with photo/PDF evidence**,
+  track status, reply in-thread
 - **Membership** (`/membership`) — subscribe with **Razorpay AutoPay (eMandate)**, get an
   automatic discount + free delivery on every order, a **premium gold interface**, and
   self-service cancellation
@@ -47,7 +48,10 @@ Cormorant Garamond).
 - **Analytics dashboard**: daily / weekly / monthly revenue charts, best & least
   sellers, items sold, average order value, discounts given, status breakdown
 - Create & remove **kitchen-staff** accounts; see & update every order
-- **CSV export** on Orders, Accounts, CRM and Support
+- **Exports everywhere** — **Excel (.xlsx)**, **CSV** and **PDF/print** for Orders,
+  Invoices, Customers, Subscriptions, Complaints, Analytics, Menu and Coupons
+- **Dish photo upload** — pick an image from the device (no image hosting needed)
+- Complaints support **file attachments** and **assignment to a staff member**
 
 **Kitchen**
 - Live order board, update status through to delivered
@@ -62,7 +66,8 @@ Cormorant Garamond).
 - **Edge middleware** guarding `/admin`, `/kitchen`, `/orders`
 - JWT httpOnly session cookies (jose), bcrypt staff passwords, Zod validation
 - Security headers, SEO (`robots`, `sitemap`, `manifest`), `next/image` optimization
-- **112-check automated end-to-end test** covering every module above
+- **141-check automated end-to-end test** covering every module above
+- Uploads stored in Postgres (2 MB/file cap) — no external object store to configure
 
 ## Roles
 
@@ -244,3 +249,6 @@ The dev fallback prints OTPs to the server console. To deliver them for real:
 | POST   | `/api/subscriptions/verify` | customer | **Verify mandate signature**, activate |
 | POST   | `/api/subscriptions/[id]/cancel` | owner/admin | Cancel at cycle end          |
 | POST   | `/api/webhooks/razorpay`    | Razorpay | **Signed** recurring-billing events  |
+| POST   | `/api/uploads`              | admin/customer | Upload dish photos / complaint files |
+| GET    | `/api/media/[id]`           | mixed    | Serve a file (menu public, tickets private) |
+| GET    | `/api/admin/export`         | admin    | `?type=…&format=xlsx\|csv` report export |

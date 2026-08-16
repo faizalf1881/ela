@@ -66,6 +66,7 @@ const createSchema = z.object({
   subject: z.string().trim().min(3).max(160),
   body: z.string().trim().min(5).max(4000),
   orderId: z.string().trim().max(60).optional(),
+  attachments: z.array(z.string().regex(/^\/api\/media\/[A-Za-z0-9_-]+$/)).max(3).optional().default([]),
 });
 
 // POST /api/tickets — customer raises a complaint / support ticket.
@@ -108,6 +109,7 @@ export async function POST(req: Request) {
           authorType: "customer",
           authorLabel: customer.name || customer.phone,
           body: parsed.data.body,
+          attachments: parsed.data.attachments,
         },
       },
     },

@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
+import { ExportMenu } from "@/components/staff/ExportMenu";
 import {
   KITCHEN_STATUSES,
   STATUS_BADGE,
@@ -241,9 +242,10 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
           <button onClick={() => setMuted((m) => !m)} className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border hover:bg-muted" title={muted ? "Unmute alerts" : "Mute alerts"}>
             {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
           </button>
-          <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2 text-sm hover:bg-muted" title="Export the orders in view">
-            <Download className="h-4 w-4" /> <span className="hidden sm:inline">Export</span>
+          <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2 text-sm hover:bg-muted" title="Export the orders currently in view">
+            <Download className="h-4 w-4" /> <span className="hidden sm:inline">View CSV</span>
           </button>
+          {showStats && <ExportMenu type="orders" label="Export all" />}
           <button onClick={load} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2 text-sm hover:bg-muted">
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} /> Refresh
           </button>
