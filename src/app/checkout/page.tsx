@@ -65,6 +65,17 @@ export default function CheckoutPage() {
       .catch(() => {});
   }, []);
 
+  // Auto-fill from the logged-in customer's profile — no need to re-enter (spec #16).
+  useEffect(() => {
+    if (user?.role === "customer") {
+      setForm((f) => ({
+        ...f,
+        name: f.name || user.name || "",
+        phone: f.phone || user.phone || "",
+      }));
+    }
+  }, [user]);
+
   const total = subtotal + (subtotal > 0 ? DELIVERY_FEE : 0);
   const isCustomer = user?.role === "customer";
 
