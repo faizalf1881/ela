@@ -44,8 +44,8 @@ export async function POST(req: Request) {
 
   const customer = await prisma.customer.upsert({
     where: { phone },
-    update: body.name ? { name: body.name } : {},
-    create: { phone, name: body.name || null },
+    update: { lastLoginAt: new Date(), ...(body.name ? { name: body.name } : {}) },
+    create: { phone, name: body.name || null, lastLoginAt: new Date() },
   });
 
   await setSessionCookie({
