@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import {
   RefreshCw,
@@ -13,6 +14,9 @@ import {
   ChevronRight,
   Check,
   CheckCircle2,
+  Printer,
+  FileText,
+  ScanLine,
 } from "lucide-react";
 import { inr } from "@/lib/utils";
 import {
@@ -51,6 +55,8 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
   const [saving, setSaving] = useState<string | null>(null);
   const [muted, setMuted] = useState(false);
   const [, setTick] = useState(0); // forces elapsed-time re-render
+  const [scan, setScan] = useState("");
+  const [scanned, setScanned] = useState<string | null>(null); // highlighted order id
 
   const seenRef = useRef<Set<string> | null>(null);
   const mutedRef = useRef(false);
@@ -134,6 +140,32 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
     }
   }
 
+  /** Scanner types the QR contents then presses Enter — look the order up and jump to it. */
+  async function handleScan(e: React.FormEvent) {
+    e.preventDefault();
+    const code = scan.trim();
+    if (!code) return;
+    setScan("");
+    try {
+      const res = await fetch("/api/orders/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Not found");
+      await load();
+      setFilter("all");
+      setScanned(data.order.id);
+      toast.success(`Order #${data.order.id.slice(-6).toUpperCase()} — ${data.order.customerName}`);
+      setTimeout(() => {
+        document.getElementById(`order-${data.order.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 50);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "No order matches that code");
+    }
+  }
+
   const visible = useMemo(() => {
     const f = FILTERS.find((x) => x.key === filter) || FILTERS[0];
     return orders.filter(f.match);
@@ -170,6 +202,18 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          <form onSubmit={handleScan}>
+            <label className="relative block">
+              <ScanLine className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <input
+                value={scan}
+                onChange={(e) => setScan(e.target.value)}
+                placeholder="Scan label QR…"
+                className="w-44 rounded-full border border-input bg-background pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60"
+                title="Scan a delivery-label QR code (or type an order/invoice number) and press Enter"
+              />
+            </label>
+          </form>
           <button onClick={() => setMuted((m) => !m)} className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border hover:bg-muted" title={muted ? "Unmute alerts" : "Mute alerts"}>
             {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
           </button>
@@ -216,7 +260,13 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
             const urgency = !active ? "text-muted-foreground bg-muted" : mins >= 20 ? "text-destructive bg-destructive/10" : mins >= 10 ? "text-[oklch(0.55_0.12_75)] bg-gold/15" : "text-forest bg-forest/10";
 
             return (
-              <div key={o.id} className="flex flex-col rounded-2xl border border-border bg-card p-5 shadow-soft">
+              <div
+                key={o.id}
+                id={`order-${o.id}`}
+                className={`flex flex-col rounded-2xl border bg-card p-5 shadow-soft transition-shadow ${
+                  scanned === o.id ? "border-gold ring-2 ring-gold/60" : "border-border"
+                }`}
+              >
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <div className="font-serif text-lg text-foreground">#{o.id.slice(-6).toUpperCase()}</div>
@@ -284,6 +334,26 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
                       <option key={st} value={st}>{STATUS_LABEL[st]}</option>
                     ))}
                   </select>
+                </div>
+
+                <div className="mt-2 flex items-center gap-2">
+                  <Link
+                    href={`/orders/${o.id}/label`}
+                    target="_blank"
+                    className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-full border border-border px-3 py-2 text-xs hover:bg-muted"
+                    title="Print delivery label with QR"
+                  >
+                    <Printer className="h-3.5 w-3.5" /> Label
+                  </Link>
+                  {o.invoiceNo && (
+                    <Link
+                      href={`/orders/${o.id}/invoice`}
+                      target="_blank"
+                      className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-full border border-border px-3 py-2 text-xs hover:bg-muted"
+                    >
+                      <FileText className="h-3.5 w-3.5" /> Invoice
+                    </Link>
+                  )}
                 </div>
               </div>
             );
