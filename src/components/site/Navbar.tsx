@@ -2,13 +2,14 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ShoppingBag, Menu, X, User, LayoutDashboard, ChefHat } from "lucide-react";
+import { ShoppingBag, Menu, X, User, LayoutDashboard, ChefHat, Crown } from "lucide-react";
 import { useCart } from "@/lib/cart";
 import { useAuth } from "@/lib/auth-client";
 
 const links = [
   { label: "Menu", href: "/#menu" },
   { label: "Our Story", href: "/#story" },
+  { label: "Membership", href: "/membership" },
   { label: "Gallery", href: "/#gallery" },
   { label: "Reviews", href: "/#reviews" },
 ];
@@ -17,7 +18,7 @@ export function Navbar() {
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
   const { count, openCart } = useCart();
-  const { user } = useAuth();
+  const { user, membership } = useAuth();
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 20);
@@ -63,9 +64,20 @@ export function Navbar() {
           </nav>
 
           <div className="flex items-center gap-2">
+            {membership.active && (
+              <Link
+                href="/membership"
+                title={`${membership.planName} member`}
+                className="hidden sm:inline-flex items-center gap-1.5 rounded-full bg-gold px-3 py-2 text-xs font-semibold text-charcoal shadow-soft"
+              >
+                <Crown className="h-3.5 w-3.5" /> Premium
+              </Link>
+            )}
             <Link
               href={account.href}
-              className="hidden sm:inline-flex items-center gap-2 rounded-full border border-border px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted transition-colors max-w-[10rem]"
+              className={`hidden sm:inline-flex items-center gap-2 rounded-full border px-4 py-2.5 text-sm font-medium text-foreground hover:bg-muted transition-colors max-w-[10rem] ${
+                membership.active ? "border-gold/60" : "border-border"
+              }`}
             >
               <AccountIcon className="h-4 w-4 shrink-0" />
               <span className="truncate">{account.label}</span>

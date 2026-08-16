@@ -98,6 +98,7 @@ export default async function InvoicePage({ params }: { params: Promise<{ id: st
           <div className="mt-4 ml-auto max-w-xs space-y-1.5 text-sm">
             <Row label="Subtotal" value={inr(order.subtotal)} />
             {order.discountTotal > 0 && <Row label="You saved" value={`- ${inr(order.discountTotal)}`} green />}
+            {order.membershipDiscount > 0 && <Row label="Member discount" value={`- ${inr(order.membershipDiscount)}`} green />}
             {order.couponDiscount > 0 && <Row label={`Coupon${order.couponCode ? ` (${order.couponCode})` : ""}`} value={`- ${inr(order.couponDiscount)}`} green />}
             <Row label="Delivery" value={order.deliveryFee > 0 ? inr(order.deliveryFee) : "Free"} />
             <div className="my-2 border-t border-black/10" />

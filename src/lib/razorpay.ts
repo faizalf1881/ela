@@ -31,7 +31,42 @@ export function verifyPaymentSignature(params: {
     .update(`${params.orderId}|${params.paymentId}`)
     .digest("hex");
 
+  return timingSafeEqualHex(expected, params.signature);
+}
+
+/**
+ * Verifies a *subscription* authorisation signature. Note the operand order is
+ * the reverse of orders: Razorpay signs `payment_id | subscription_id`.
+ */
+export function verifySubscriptionSignature(params: {
+  subscriptionId: string;
+  paymentId: string;
+  signature: string;
+}): boolean {
+  const secret = process.env.RAZORPAY_KEY_SECRET;
+  if (!secret) throw new Error("RAZORPAY_KEY_SECRET missing");
+
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(`${params.paymentId}|${params.subscriptionId}`)
+    .digest("hex");
+
+  return timingSafeEqualHex(expected, params.signature);
+}
+
+/**
+ * Verifies a Razorpay webhook body against the X-Razorpay-Signature header,
+ * using RAZORPAY_WEBHOOK_SECRET. Returns false when no secret is configured.
+ */
+export function verifyWebhookSignature(rawBody: string, signature: string | null): boolean {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret || !signature) return false;
+  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+  return timingSafeEqualHex(expected, signature);
+}
+
+function timingSafeEqualHex(expected: string, given: string): boolean {
   const a = Buffer.from(expected, "utf8");
-  const b = Buffer.from(params.signature || "", "utf8");
+  const b = Buffer.from(given || "", "utf8");
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }

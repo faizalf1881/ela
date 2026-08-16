@@ -3,7 +3,7 @@
 import { useEffect, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText, MapPin, TicketPercent, Wallet, Contact, Star, LifeBuoy } from "lucide-react";
+import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText, MapPin, TicketPercent, Wallet, Contact, Star, LifeBuoy, Crown } from "lucide-react";
 import { useAuth, type Role } from "@/lib/auth-client";
 
 const ADMIN_NAV = [
@@ -13,6 +13,7 @@ const ADMIN_NAV = [
   { href: "/admin/menu", label: "Menu", icon: UtensilsCrossed },
   { href: "/admin/locations", label: "Locations", icon: MapPin },
   { href: "/admin/coupons", label: "Coupons", icon: TicketPercent },
+  { href: "/admin/memberships", label: "Memberships", icon: Crown },
   { href: "/admin/crm", label: "Customers", icon: Contact },
   { href: "/admin/reviews", label: "Reviews", icon: Star },
   { href: "/admin/complaints", label: "Support", icon: LifeBuoy },

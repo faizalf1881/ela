@@ -18,6 +18,7 @@ import {
   FileText,
   TicketPercent,
   X,
+  Crown,
 } from "lucide-react";
 import { Navbar } from "@/components/site/Navbar";
 import { Footer, WhatsAppFab } from "@/components/site/Footer";
@@ -55,7 +56,7 @@ function loadRazorpay(): Promise<boolean> {
 export default function CheckoutPage() {
   const router = useRouter();
   const { items, setQty, remove, subtotal, clear, count } = useCart();
-  const { user, loading: authLoading } = useAuth();
+  const { user, membership, loading: authLoading } = useAuth();
   const [form, setForm] = useState({ name: "", phone: "", locationId: "", method: "razorpay" as "razorpay" | "cod" });
   const [locations, setLocations] = useState<Location[]>([]);
   const [couponInput, setCouponInput] = useState("");
@@ -93,9 +94,12 @@ export default function CheckoutPage() {
   }, [subtotal]);
 
   const selectedLocation = locations.find((l) => l.id === form.locationId) || null;
-  const deliveryFee = subtotal > 0 && selectedLocation ? selectedLocation.deliveryFee : 0;
+  // Membership benefits mirror the server calculation in /api/orders.
+  const membershipDiscount = membership.active ? Math.round((subtotal * membership.discountPercent) / 100) : 0;
+  const freeDelivery = membership.active && membership.freeDelivery;
+  const deliveryFee = subtotal > 0 && selectedLocation && !freeDelivery ? selectedLocation.deliveryFee : 0;
   const couponDiscount = applied?.discount ?? 0;
-  const total = Math.max(0, subtotal - couponDiscount) + deliveryFee;
+  const total = Math.max(0, subtotal - membershipDiscount - couponDiscount) + deliveryFee;
   const isCustomer = user?.role === "customer";
 
   async function applyCoupon() {
@@ -392,8 +396,13 @@ export default function CheckoutPage() {
                 <h2 className="font-serif text-2xl text-foreground">Order summary</h2>
                 <dl className="mt-4 space-y-2 text-sm">
                   <Row label="Subtotal" value={inr(subtotal)} />
+                  {membershipDiscount > 0 && <Row label={`${membership.planName} member (${membership.discountPercent}%)`} value={`- ${inr(membershipDiscount)}`} green />}
                   {applied && <Row label={`Coupon (${applied.code})`} value={`- ${inr(couponDiscount)}`} green />}
-                  <Row label="Delivery" value={subtotal > 0 ? (selectedLocation ? (deliveryFee > 0 ? inr(deliveryFee) : "Free") : "Select area") : "—"} />
+                  <Row
+                    label="Delivery"
+                    value={subtotal > 0 ? (freeDelivery ? "Free (member)" : selectedLocation ? (deliveryFee > 0 ? inr(deliveryFee) : "Free") : "Select area") : "—"}
+                    green={freeDelivery && subtotal > 0}
+                  />
                   <div className="h-px bg-border my-3" />
                   <Row label="Total" value={inr(total)} bold />
                 </dl>
@@ -409,6 +418,15 @@ export default function CheckoutPage() {
                 <p className="mt-3 text-xs text-muted-foreground text-center">
                   Payments are processed securely by Razorpay. Your card details never touch our servers.
                 </p>
+                {isCustomer && !membership.active && (
+                  <Link
+                    href="/membership"
+                    className="mt-4 flex items-center justify-center gap-1.5 rounded-xl bg-gold/10 px-3 py-2.5 text-xs text-foreground hover:bg-gold/20 transition-colors"
+                  >
+                    <Crown className="h-3.5 w-3.5 text-gold" />
+                    Members save on every order — see plans
+                  </Link>
+                )}
               </div>
             </form>
           </div>

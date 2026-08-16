@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Search, Download, X, Save, Loader2, Phone, MapPin, Calendar, ShoppingBag, Wallet } from "lucide-react";
+import { Search, Download, X, Save, Loader2, Phone, MapPin, Calendar, ShoppingBag, Wallet, Crown } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
 import { STATUS_LABEL, type OrderStatus } from "@/lib/order-status";
@@ -32,6 +32,13 @@ type Customer = {
   lastOrderAt: string | null;
   preferredMethod: string;
   orders: OrderLite[];
+  subscriptionStatus: string;
+  planName: string | null;
+  planPrice: number | null;
+  planInterval: string | null;
+  renewsAt: string | null;
+  subscriptionPaid: number;
+  subscriptionPayments: { id: string; amount: number; paidAt: string }[];
 };
 
 const METHOD_LABEL: Record<string, string> = { razorpay: "Online", cod: "Cash", manual: "Manual" };
@@ -73,6 +80,9 @@ export function CrmBoard() {
         "Preferred payment": METHOD_LABEL[c.preferredMethod] || c.preferredMethod,
         "Last order": fmtDate(c.lastOrderAt),
         "Last login": fmt(c.lastLoginAt),
+        Membership: c.subscriptionStatus === "ACTIVE" ? c.planName || "Active" : c.subscriptionStatus,
+        "Renewal date": fmtDate(c.renewsAt),
+        "Membership paid": c.subscriptionPaid,
       })),
     );
   }
@@ -183,7 +193,34 @@ function CustomerDetail({ customer, onClose, onSaved }: { customer: Customer; on
             <Info icon={MapPin} label="Address" value={customer.address || "—"} />
             <Info icon={Calendar} label="Last login / activity" value={fmt(customer.lastLoginAt)} />
             <Info icon={Wallet} label="Preferred payment" value={METHOD_LABEL[customer.preferredMethod] || "—"} />
+            <Info
+              icon={Crown}
+              label="Subscription"
+              value={
+                customer.subscriptionStatus === "ACTIVE"
+                  ? `${customer.planName} — ${inr(customer.planPrice || 0)}/${(customer.planInterval || "").toLowerCase().replace("ly", "")}`
+                  : customer.subscriptionStatus === "NONE"
+                    ? "No membership"
+                    : `${customer.planName ?? "—"} (${customer.subscriptionStatus.toLowerCase()})`
+              }
+            />
+            {customer.renewsAt && <Info icon={Calendar} label="Renewal date" value={fmtDate(customer.renewsAt)} />}
+            {customer.subscriptionPaid > 0 && <Info icon={Wallet} label="Membership paid" value={inr(customer.subscriptionPaid)} />}
           </div>
+
+          {customer.subscriptionPayments.length > 0 && (
+            <div>
+              <div className="text-xs uppercase tracking-wider text-muted-foreground mb-2">Membership payments</div>
+              <div className="space-y-1.5">
+                {customer.subscriptionPayments.map((p) => (
+                  <div key={p.id} className="flex justify-between rounded-xl border border-border px-3 py-2 text-sm">
+                    <span className="text-muted-foreground">{fmtDate(p.paidAt)}</span>
+                    <span className="text-foreground">{inr(p.amount)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Editable */}
           <div className="space-y-3">

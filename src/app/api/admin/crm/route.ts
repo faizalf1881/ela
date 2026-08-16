@@ -22,6 +22,10 @@ export async function GET(req: Request) {
         orderBy: { createdAt: "desc" },
         select: { id: true, invoiceNo: true, createdAt: true, total: true, paymentMethod: true, paymentStatus: true, status: true },
       },
+      subscriptions: {
+        orderBy: { createdAt: "desc" },
+        include: { plan: { select: { name: true, price: true, interval: true } }, charges: { orderBy: { paidAt: "desc" } } },
+      },
     },
     orderBy: { createdAt: "desc" },
     take: 500,
@@ -34,8 +38,17 @@ export async function GET(req: Request) {
     for (const o of c.orders) methodCounts[o.paymentMethod] = (methodCounts[o.paymentMethod] || 0) + 1;
     const preferredMethod = Object.entries(methodCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
     const current = c.orders.filter((o) => ["PLACED", "PREPARING", "OUT_FOR_DELIVERY"].includes(o.status)).length;
+    const activeSub = c.subscriptions.find((s) => s.status === "ACTIVE") ?? null;
+    const subscriptionPayments = c.subscriptions.flatMap((s) => s.charges);
 
     return {
+      subscriptionStatus: activeSub ? "ACTIVE" : (c.subscriptions[0]?.status ?? "NONE"),
+      planName: activeSub?.plan.name ?? c.subscriptions[0]?.plan.name ?? null,
+      planPrice: activeSub?.plan.price ?? null,
+      planInterval: activeSub?.plan.interval ?? null,
+      renewsAt: activeSub?.currentEnd ?? null,
+      subscriptionPaid: subscriptionPayments.reduce((n, p) => n + p.amount, 0),
+      subscriptionPayments: subscriptionPayments.map((p) => ({ id: p.id, amount: p.amount, paidAt: p.paidAt })),
       id: c.id,
       name: c.name,
       phone: c.phone,

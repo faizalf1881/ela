@@ -80,6 +80,33 @@ const REVIEWS = [
   { authorName: "Divya S.", location: "Technopark", rating: 5, body: "Finally a service that treats Kerala food with respect. Beautifully packed.", sortOrder: 5 },
 ];
 
+// Starter membership plans — admin edits pricing/benefits in Admin → Memberships
+// and sets them live. Seeded inactive so nothing sells at a placeholder price.
+const PLANS = [
+  {
+    name: "Ela Silver",
+    description: "For regulars who order a few times a month.",
+    price: 299,
+    interval: "MONTHLY" as const,
+    discountPercent: 5,
+    freeDelivery: true,
+    benefits: ["Free delivery on every order", "Member-only festival menus"],
+    active: false,
+    sortOrder: 1,
+  },
+  {
+    name: "Ela Gold",
+    description: "For families who eat with us every week.",
+    price: 599,
+    interval: "MONTHLY" as const,
+    discountPercent: 12,
+    freeDelivery: true,
+    benefits: ["Free delivery on every order", "Priority kitchen slot", "Early access to Onam & Vishu sadya booking"],
+    active: false,
+    sortOrder: 2,
+  },
+];
+
 async function main() {
   // ---- Admin (hardcoded username/password from .env) ----
   const username = process.env.ADMIN_USERNAME || "admin";
@@ -138,6 +165,17 @@ async function main() {
   // ---- Ticket counter ----
   await prisma.counter.upsert({ where: { name: "ticket" }, update: {}, create: { name: "ticket", value: 0 } });
   console.log("✓ Ticket counter ready");
+
+  // ---- Membership plans ----
+  // Seeded inactive: the admin edits the pricing/benefits, then flips them live.
+  // (Going live also needs Subscriptions enabled on the Razorpay account.)
+  const planCount = await prisma.subscriptionPlan.count();
+  if (planCount === 0) {
+    for (const p of PLANS) await prisma.subscriptionPlan.create({ data: p });
+    console.log(`✓ Seeded ${PLANS.length} membership plans (inactive — review pricing, then set them live)`);
+  } else {
+    console.log(`• ${planCount} membership plans already exist — skipping`);
+  }
 }
 
 main()

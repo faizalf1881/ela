@@ -148,6 +148,21 @@
   height: 1px;
 }
 
+/*
+ * Premium members get a warmer, gold-leaning surface. Only background/border
+ * tokens shift — text tokens stay put so contrast (and readability) is unchanged.
+ */
+.premium {
+  --background: color-mix(in oklab, var(--gold) 7%, var(--ivory));
+  --card: color-mix(in oklab, var(--gold) 4%, white);
+  --border: color-mix(in oklab, var(--gold) 30%, transparent);
+  --ring: var(--gold);
+}
+.premium .shadow-soft,
+.premium .shadow-elegant {
+  box-shadow: 0 10px 40px color-mix(in oklab, var(--gold) 18%, transparent);
+}
+
 @keyframes float-leaf {
   0%, 100% { transform: translateY(0) rotate(0deg); }
   50% { transform: translateY(-24px) rotate(8deg); }

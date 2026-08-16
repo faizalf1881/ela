@@ -8,6 +8,7 @@ import { finalizeOrder } from "@/lib/fulfillment";
 import { notifyOrderStatus, notifyNewOrderToAdmin } from "@/lib/notify";
 import { audit, actorFrom } from "@/lib/audit";
 import { evaluateCoupon } from "@/lib/coupon";
+import { getMembership } from "@/lib/membership";
 
 export const runtime = "nodejs";
 
@@ -104,7 +105,11 @@ export async function POST(req: Request) {
 
   const subtotal = lineItems.reduce((n, i) => n + i.price * i.qty, 0);
   const discountTotal = lineItems.reduce((n, i) => n + (i.mrp - i.price) * i.qty, 0);
-  const deliveryFee = subtotal > 0 ? location.deliveryFee : 0;
+
+  // Membership benefits — resolved server-side from the active subscription.
+  const membership = await getMembership(s.sub);
+  const membershipDiscount = membership.active ? Math.round((subtotal * membership.discountPercent) / 100) : 0;
+  const deliveryFee = subtotal > 0 && !(membership.active && membership.freeDelivery) ? location.deliveryFee : 0;
 
   // Coupon — re-validated server-side against the live subtotal (never trust the client).
   let couponDiscount = 0;
@@ -116,7 +121,7 @@ export async function POST(req: Request) {
     appliedCode = cr.code;
   }
 
-  const total = Math.max(0, subtotal - couponDiscount) + deliveryFee;
+  const total = Math.max(0, subtotal - membershipDiscount - couponDiscount) + deliveryFee;
 
   if (total < 1) {
     return NextResponse.json({ error: "Order total too low." }, { status: 400 });
@@ -133,6 +138,7 @@ export async function POST(req: Request) {
       discountTotal,
       couponCode: appliedCode,
       couponDiscount,
+      membershipDiscount,
       deliveryFee,
       total,
       paymentMethod,

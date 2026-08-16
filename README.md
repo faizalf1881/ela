@@ -25,6 +25,9 @@ Cormorant Garamond).
 - Razorpay online payment (UPI/cards/wallets) **or** Cash on Delivery
 - Order history with live status + **printable invoice** (sequential invoice numbers)
 - **Help & complaints portal** (`/support`) — raise a ticket, track status, reply in-thread
+- **Membership** (`/membership`) — subscribe with **Razorpay AutoPay (eMandate)**, get an
+  automatic discount + free delivery on every order, a **premium gold interface**, and
+  self-service cancellation
 
 **Admin**
 - **Accounts** — every invoice with filters (status / method / date / customer),
@@ -32,6 +35,8 @@ Cormorant Garamond).
 - Full menu CRUD with **per-item discount %** and **stock limits**
 - **Delivery locations** — add/edit/remove areas, per-area fee, activate/deactivate
 - **Coupons** — percent or fixed, min order, max discount, usage limits, validity dates
+- **Memberships** — create subscription plans (price, billing cycle, order discount,
+  free delivery, benefit list), see subscribers, recurring revenue and payment history
 - **CRM** — customer directory with order history, lifetime spend, preferred payment,
   last activity and internal notes
 - **Reviews** — publish/unpublish/edit/delete testimonials + a shareable
@@ -57,7 +62,7 @@ Cormorant Garamond).
 - **Edge middleware** guarding `/admin`, `/kitchen`, `/orders`
 - JWT httpOnly session cookies (jose), bcrypt staff passwords, Zod validation
 - Security headers, SEO (`robots`, `sitemap`, `manifest`), `next/image` optimization
-- **91-check automated end-to-end test** covering every module above
+- **112-check automated end-to-end test** covering every module above
 
 ## Roles
 
@@ -159,6 +164,26 @@ Already git-committed and configured — `vercel.json` sets the build command
 
 ---
 
+## Turning on memberships
+
+1. **Razorpay → Subscriptions** must be enabled on the account (it is used to hold the
+   customer's **eMandate/AutoPay** authorisation).
+2. **Add the webhook** so renewals keep memberships active:
+   - URL `https://YOUR-DOMAIN/api/webhooks/razorpay`
+   - Events: `subscription.charged`, `activated`, `halted`, `paused`, `resumed`,
+     `cancelled`, `completed`
+   - Put the webhook secret in **`RAZORPAY_WEBHOOK_SECRET`**. Unsigned calls are rejected.
+3. **Admin → Memberships** → edit the seeded plans (price, cycle, order discount, free
+   delivery, benefits) and switch them **Live**. Plans are seeded **inactive** so nothing
+   ever sells at a placeholder price.
+
+Each plan is mirrored into Razorpay on save. If a plan shows *"Not linked to Razorpay"*,
+subscriptions aren't enabled on the account yet — fix that, then save the plan again.
+Changing a live plan's price or cycle creates a **new** Razorpay plan; existing members
+keep their old rate until they resubscribe.
+
+---
+
 ## Going live with real WhatsApp OTP
 
 The dev fallback prints OTPs to the server console. To deliver them for real:
@@ -212,3 +237,10 @@ The dev fallback prints OTPs to the server console. To deliver them for real:
 | GET/POST | `/api/tickets`            | any      | List tickets / raise a complaint     |
 | PATCH  | `/api/tickets/[id]`         | any      | Reply, internal note, change status  |
 | POST   | `/api/orders/scan`          | staff    | Look an order up from a label QR     |
+| GET    | `/api/plans`                | public   | Live membership plans (`?all=1` admin)|
+| POST   | `/api/plans`                | admin    | Create a plan (mirrors into Razorpay)|
+| PATCH/DELETE | `/api/plans/[id]`     | admin    | Update / hide / delete a plan        |
+| GET/POST | `/api/subscriptions`      | any      | List memberships / start one (eMandate)|
+| POST   | `/api/subscriptions/verify` | customer | **Verify mandate signature**, activate |
+| POST   | `/api/subscriptions/[id]/cancel` | owner/admin | Cancel at cycle end          |
+| POST   | `/api/webhooks/razorpay`    | Razorpay | **Signed** recurring-billing events  |

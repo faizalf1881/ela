@@ -6,6 +6,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { PrismaClient } from "@prisma/client";
 
 const BASE = process.env.E2E_BASE || "http://localhost:3000";
 const LOG = process.env.SERVER_LOG || path.join(process.cwd(), ".next", "e2e-server.log");
@@ -41,6 +42,36 @@ function ok(cond: boolean, msg: string) {
     console.log(`  ✗ ${msg}`);
   }
 }
+/**
+ * Razorpay's mandate-authorisation screen is hosted and can't be scripted, so we
+ * activate a membership directly in the DB — everything after this point (benefit
+ * pricing, CRM, cancellation) still goes through the real HTTP API.
+ */
+async function activateMembershipForTest(customerId: string, planId: string): Promise<boolean> {
+  const prisma = new PrismaClient();
+  try {
+    const renews = new Date();
+    renews.setMonth(renews.getMonth() + 1);
+    await prisma.subscription.create({
+      data: {
+        customerId,
+        planId,
+        status: "ACTIVE",
+        razorpaySubscriptionId: "sub_e2e_" + crypto.randomBytes(6).toString("hex"),
+        startedAt: new Date(),
+        currentEnd: renews,
+        charges: { create: { amount: 499, razorpayPaymentId: "pay_e2e_" + crypto.randomBytes(6).toString("hex") } },
+      },
+    });
+    return true;
+  } catch (e) {
+    console.log("    ! could not activate test membership:", (e as Error).message.split("\n")[0]);
+    return false;
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 function section(t: string) {
   console.log(`\n▸ ${t}`);
 }
@@ -386,6 +417,95 @@ async function main() {
   ok(scanBad.status === 404, "unknown scan code → 404");
   const scanCust = await customer.fetch("/api/orders/scan", { method: "POST", body: JSON.stringify({ code: dbOrderId }) });
   ok(scanCust.status === 403, "customers cannot scan → 403");
+
+  // ---------- Memberships / subscriptions ----------
+  section("Memberships (plans + benefits)");
+  const planRes = await admin.fetch("/api/plans", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "E2E Gold",
+      description: "Test plan",
+      price: 499,
+      interval: "MONTHLY",
+      discountPercent: 10,
+      freeDelivery: true,
+      benefits: ["Free delivery", "Priority kitchen"],
+      active: true,
+    }),
+  });
+  const planJson = await planRes.json();
+  ok(planRes.status === 201, `admin creates plan → 201 ${planRes.status !== 201 ? JSON.stringify(planJson) : ""}`);
+  const planId: string = planJson.plan.id;
+  const rzpLinked = Boolean(planJson.plan.razorpayPlanId);
+  console.log(`    ${rzpLinked ? "·" : "!"} Razorpay plan link: ${rzpLinked ? planJson.plan.razorpayPlanId : "NOT linked (Subscriptions likely disabled on the account)"}`);
+
+  const pubPlans = await (await new Client().fetch("/api/plans")).json();
+  ok(pubPlans.plans.some((p: { id: string }) => p.id === planId), "active plan is public");
+  const custPlan = await customer.fetch("/api/plans", { method: "POST", body: JSON.stringify({ name: "Nope", price: 1 }) });
+  ok(custPlan.status === 403, "customer cannot create plans → 403");
+
+  // No membership yet → member pricing must NOT apply.
+  const preMe = await (await customer.fetch("/api/auth/me")).json();
+  ok(preMe.membership?.active === false, "customer has no active membership yet");
+
+  // Simulate an activated membership directly in the DB (Razorpay's hosted mandate
+  // screen can't be automated), then re-check that benefits apply server-side.
+  const activated = await activateMembershipForTest(crmMe.id, planId);
+  ok(activated, "test membership activated in DB");
+
+  const memberMe = await (await customer.fetch("/api/auth/me")).json();
+  ok(memberMe.membership?.active === true && memberMe.membership?.discountPercent === 10, "session reports active membership + benefits");
+
+  const memberOrder = await customer.fetch("/api/orders", {
+    method: "POST",
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E Member", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
+  });
+  const mo = await memberOrder.json();
+  ok(memberOrder.status === 200, "member places order → 200");
+  ok(mo.order?.membershipDiscount > 0, `member discount applied (−₹${mo.order?.membershipDiscount})`);
+  ok(mo.order?.deliveryFee === 0, "member gets free delivery");
+  ok(
+    mo.order?.total === mo.order?.subtotal - mo.order?.membershipDiscount - mo.order?.couponDiscount + mo.order?.deliveryFee,
+    "member total = subtotal − member discount − coupon + delivery",
+  );
+
+  const subsList = await (await customer.fetch("/api/subscriptions")).json();
+  ok(subsList.subscriptions?.length > 0, "customer sees own subscription");
+  const subId: string = subsList.subscriptions[0].id;
+
+  const dupSub = await customer.fetch("/api/subscriptions", { method: "POST", body: JSON.stringify({ planId }) });
+  ok(dupSub.status === 409 || dupSub.status === 503, "cannot double-subscribe while active");
+
+  const crmSub = await (await admin.fetch("/api/admin/crm")).json();
+  const crmRow = crmSub.customers.find((c: { id: string }) => c.id === crmMe.id);
+  ok(crmRow?.subscriptionStatus === "ACTIVE" && crmRow?.planName === "E2E Gold", "CRM shows subscription status + plan");
+  ok(!!crmRow?.renewsAt, "CRM shows renewal date");
+
+  // Webhook must reject an unsigned/forged body.
+  const badHook = await new Client().fetch("/api/webhooks/razorpay", {
+    method: "POST",
+    body: JSON.stringify({ event: "subscription.charged", payload: {} }),
+  });
+  ok(badHook.status === 400, "unsigned Razorpay webhook rejected → 400");
+
+  const cancelled = await customer.fetch(`/api/subscriptions/${subId}/cancel`, { method: "POST" });
+  ok(cancelled.status === 200, "customer cancels membership → 200");
+  const afterCancel = await (await customer.fetch("/api/auth/me")).json();
+  ok(afterCancel.membership?.active === false, "benefits stop after cancellation");
+
+  // A plan with billing history must be hidden, not hard-deleted (keeps history intact).
+  const planDel = await admin.fetch(`/api/plans/${planId}`, { method: "DELETE" });
+  const pd = await planDel.json();
+  ok(planDel.status === 200, `remove plan with history → 200 ${planDel.status !== 200 ? JSON.stringify(pd) : ""}`);
+  ok(pd.deactivated === true && pd.plan?.active === false, "plan with subscriptions is hidden, not deleted");
+  const afterDel = await (await new Client().fetch("/api/plans")).json();
+  ok(!afterDel.plans.some((p: { id: string }) => p.id === planId), "hidden plan no longer offered publicly");
+
+  // A brand-new plan with no subscribers is safe to hard-delete.
+  const throwaway = await admin.fetch("/api/plans", { method: "POST", body: JSON.stringify({ name: "E2E Temp", price: 99, interval: "MONTHLY" }) });
+  const tId = (await throwaway.json()).plan.id;
+  const tDel = await admin.fetch(`/api/plans/${tId}`, { method: "DELETE" });
+  ok(tDel.status === 200 && (await tDel.json()).ok === true, "unused plan is hard-deleted");
 
   // ---------- Audit trail ----------
   section("Audit trail");

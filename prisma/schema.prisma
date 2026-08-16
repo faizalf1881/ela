@@ -12,15 +12,16 @@ datasource db {
 
 /// Customers authenticate via WhatsApp OTP (phone is the identity).
 model Customer {
-  id          String    @id @default(cuid())
-  phone       String    @unique
-  name        String?
-  address     String? // saved delivery address / landmark
-  notes       String? // admin CRM notes
-  lastLoginAt DateTime?
-  createdAt   DateTime  @default(now())
-  orders      Order[]
-  tickets     Ticket[]
+  id            String         @id @default(cuid())
+  phone         String         @unique
+  name          String?
+  address       String? // saved delivery address / landmark
+  notes         String? // admin CRM notes
+  lastLoginAt   DateTime?
+  createdAt     DateTime       @default(now())
+  orders        Order[]
+  tickets       Ticket[]
+  subscriptions Subscription[]
 }
 
 /// One-time passwords for customer login.
@@ -102,12 +103,13 @@ model Order {
 
   items OrderItem[]
 
-  subtotal       Int // sum of discounted line prices
-  discountTotal  Int     @default(0) // total saved vs MRP
-  couponCode     String?
-  couponDiscount Int     @default(0) // saved via coupon
-  deliveryFee    Int     @default(0)
-  total          Int
+  subtotal           Int // sum of discounted line prices
+  discountTotal      Int     @default(0) // total saved vs MRP
+  couponCode         String?
+  couponDiscount     Int     @default(0) // saved via coupon
+  membershipDiscount Int     @default(0) // saved via active subscription
+  deliveryFee        Int     @default(0)
+  total              Int
 
   invoiceNo String? @unique
   source    String  @default("web") // web | manual (admin-created invoice)
@@ -260,6 +262,77 @@ model Ticket {
   @@index([status])
   @@index([customerId])
   @@index([createdAt])
+}
+
+enum PlanInterval {
+  WEEKLY
+  MONTHLY
+  YEARLY
+}
+
+/// Membership plans customers can subscribe to (admin-managed).
+model SubscriptionPlan {
+  id              String       @id @default(cuid())
+  name            String
+  description     String       @default("")
+  price           Int // whole rupees charged each billing cycle
+  interval        PlanInterval @default(MONTHLY)
+  intervalCount   Int          @default(1) // e.g. every 1 month
+  discountPercent Int          @default(0) // auto-applied to every order
+  freeDelivery    Boolean      @default(true)
+  benefits        String[] // bullet points shown on the plan card
+  active          Boolean      @default(true)
+  sortOrder       Int          @default(0)
+  razorpayPlanId  String? // set when mirrored into Razorpay
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  subscriptions Subscription[]
+}
+
+enum SubscriptionStatus {
+  CREATED // awaiting the customer's first authorisation
+  ACTIVE
+  PAUSED
+  CANCELLED
+  EXPIRED
+}
+
+/// A customer's membership. Billing (eMandate/AutoPay) is handled by Razorpay.
+model Subscription {
+  id         String           @id @default(cuid())
+  customer   Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  customerId String
+  plan       SubscriptionPlan @relation(fields: [planId], references: [id])
+  planId     String
+
+  status                 SubscriptionStatus @default(CREATED)
+  razorpaySubscriptionId String?            @unique
+  razorpayPaymentId      String?
+
+  startedAt   DateTime?
+  currentEnd  DateTime? // next renewal date
+  cancelledAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  charges SubscriptionCharge[]
+
+  @@index([customerId])
+  @@index([status])
+}
+
+/// One row per successful recurring charge (payment history).
+model SubscriptionCharge {
+  id                String       @id @default(cuid())
+  subscription      Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  subscriptionId    String
+  amount            Int // whole rupees
+  razorpayPaymentId String?      @unique
+  paidAt            DateTime     @default(now())
+
+  @@index([subscriptionId])
 }
 
 model TicketMessage {
