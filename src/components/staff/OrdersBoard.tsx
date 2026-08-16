@@ -17,8 +17,10 @@ import {
   Printer,
   FileText,
   ScanLine,
+  Download,
 } from "lucide-react";
 import { inr } from "@/lib/utils";
+import { downloadCsv } from "@/lib/export";
 import {
   KITCHEN_STATUSES,
   STATUS_BADGE,
@@ -171,6 +173,28 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
     return orders.filter(f.match);
   }, [orders, filter]);
 
+  function exportCsv() {
+    if (!visible.length) return toast.error("Nothing to export");
+    downloadCsv(
+      `orders-${new Date().toISOString().slice(0, 10)}.csv`,
+      visible.map((o) => ({
+        Order: `#${o.id.slice(-6).toUpperCase()}`,
+        Invoice: o.invoiceNo || "",
+        Date: new Date(o.createdAt).toLocaleString("en-IN"),
+        Customer: o.customerName,
+        Phone: o.customerPhone,
+        Address: o.address,
+        Items: o.items.map((i) => `${i.name} x${i.qty}`).join("; "),
+        Subtotal: o.subtotal,
+        Delivery: o.deliveryFee,
+        Total: o.total,
+        Payment: o.paymentMethod,
+        Paid: o.paymentStatus,
+        Status: STATUS_LABEL[o.status],
+      })),
+    );
+  }
+
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
     for (const f of FILTERS) c[f.key] = orders.filter(f.match).length;
@@ -216,6 +240,9 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
           </form>
           <button onClick={() => setMuted((m) => !m)} className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border hover:bg-muted" title={muted ? "Unmute alerts" : "Mute alerts"}>
             {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+          </button>
+          <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2 text-sm hover:bg-muted" title="Export the orders in view">
+            <Download className="h-4 w-4" /> <span className="hidden sm:inline">Export</span>
           </button>
           <button onClick={load} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2 text-sm hover:bg-muted">
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} /> Refresh

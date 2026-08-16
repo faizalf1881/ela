@@ -63,6 +63,23 @@ const MENU = [
   },
 ];
 
+// Starter delivery areas — the admin edits/adds/removes these in Admin → Locations.
+const LOCATIONS = [
+  { name: "Pattom", area: "Near Medical College", deliveryFee: 40, sortOrder: 1 },
+  { name: "Kowdiar", area: "Kowdiar & around", deliveryFee: 40, sortOrder: 2 },
+  { name: "Vazhuthacaud", area: "Vazhuthacaud", deliveryFee: 50, sortOrder: 3 },
+  { name: "Technopark", area: "Kazhakkoottam", deliveryFee: 60, sortOrder: 4 },
+];
+
+// Local (Trivandrum) testimonials — admin manages these in Admin → Reviews.
+const REVIEWS = [
+  { authorName: "Priya Nair", location: "Trivandrum", rating: 5, body: "Meen curry so good my Malayali husband demanded seconds. That is a review.", sortOrder: 1 },
+  { authorName: "Anjali Menon", location: "Pattom", rating: 5, body: "The avial tastes exactly like my grandmother's. I nearly cried at my desk.", sortOrder: 2 },
+  { authorName: "Rahul Krishnan", location: "Kowdiar", rating: 5, body: "The Onam sadya was flawless. Banana leaf, payasam, everything.", sortOrder: 3 },
+  { authorName: "Vishnu Pillai", location: "Vazhuthacaud", rating: 5, body: "Delivered piping hot. The kappa was soft, the fish flaked perfectly.", sortOrder: 4 },
+  { authorName: "Divya S.", location: "Technopark", rating: 5, body: "Finally a service that treats Kerala food with respect. Beautifully packed.", sortOrder: 5 },
+];
+
 async function main() {
   // ---- Admin (hardcoded username/password from .env) ----
   const username = process.env.ADMIN_USERNAME || "admin";
@@ -99,6 +116,28 @@ async function main() {
   } else {
     console.log(`• Menu already has ${count} items — skipping menu seed`);
   }
+
+  // ---- Delivery locations (admin can edit/add/remove these) ----
+  const locCount = await prisma.deliveryLocation.count();
+  if (locCount === 0) {
+    for (const l of LOCATIONS) await prisma.deliveryLocation.create({ data: l });
+    console.log(`✓ Seeded ${LOCATIONS.length} delivery locations`);
+  } else {
+    console.log(`• ${locCount} delivery locations already exist — skipping`);
+  }
+
+  // ---- Website reviews ----
+  const revCount = await prisma.review.count();
+  if (revCount === 0) {
+    for (const r of REVIEWS) await prisma.review.create({ data: r });
+    console.log(`✓ Seeded ${REVIEWS.length} reviews`);
+  } else {
+    console.log(`• ${revCount} reviews already exist — skipping`);
+  }
+
+  // ---- Ticket counter ----
+  await prisma.counter.upsert({ where: { name: "ticket" }, update: {}, create: { name: "ticket", value: 0 } });
+  console.log("✓ Ticket counter ready");
 }
 
 main()
