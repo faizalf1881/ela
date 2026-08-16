@@ -53,7 +53,7 @@ export default function CheckoutPage() {
   const router = useRouter();
   const { items, setQty, remove, subtotal, clear, count } = useCart();
   const { user, loading: authLoading } = useAuth();
-  const [form, setForm] = useState({ name: "", phone: "", address: "", notes: "", method: "razorpay" as "razorpay" | "cod" });
+  const [form, setForm] = useState({ name: "", phone: "", address: "", method: "razorpay" as "razorpay" | "cod" });
   const [placed, setPlaced] = useState<null | { id: string; total: number; method: string }>(null);
   const [busy, setBusy] = useState(false);
   const [store, setStore] = useState<{ accepting: boolean; message: string | null }>({ accepting: true, message: null });
@@ -91,7 +91,6 @@ export default function CheckoutPage() {
           name: form.name,
           phone: form.phone,
           address: form.address,
-          notes: form.notes || undefined,
           paymentMethod: form.method,
         }),
       });
@@ -273,7 +272,6 @@ export default function CheckoutPage() {
                   <Field label="Full name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} placeholder="Anjali Nair" />
                   <Field label="Phone (WhatsApp)" value={form.phone} onChange={(v) => setForm({ ...form, phone: v })} placeholder="+91 9XXXXXXXXX" type="tel" />
                   <Field label="Delivery address" value={form.address} onChange={(v) => setForm({ ...form, address: v })} placeholder="Flat / Street / City / PIN" textarea />
-                  <Field label="Notes (optional)" value={form.notes} onChange={(v) => setForm({ ...form, notes: v })} placeholder="Less spice, no coriander…" textarea />
                 </div>
 
                 <div className="mt-5">

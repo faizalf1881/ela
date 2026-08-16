@@ -111,7 +111,7 @@ export function MenuGrid({ items, accepting = true }: { items: MenuCardItem[]; a
                     )}
                     {soldOut && (
                       <div className="absolute inset-0 flex items-center justify-center bg-charcoal/40">
-                        <span className="rounded-full bg-charcoal px-4 py-1.5 text-sm font-medium text-ivory">Sold out</span>
+                        <span className="rounded-full bg-charcoal px-4 py-1.5 text-sm font-medium text-ivory">Stock Out</span>
                       </div>
                     )}
                   </div>
@@ -143,7 +143,7 @@ export function MenuGrid({ items, accepting = true }: { items: MenuCardItem[]; a
 
                       {soldOut || !accepting ? (
                         <button disabled className="rounded-full bg-muted px-4 py-2 text-xs font-medium text-muted-foreground cursor-not-allowed">
-                          {accepting ? "Sold out" : "Closed"}
+                          {accepting ? "Stock Out" : "Closed"}
                         </button>
                       ) : qty === 0 ? (
                         <button

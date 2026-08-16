@@ -18,9 +18,9 @@ export function Story() {
             </div>
             <div className="absolute -bottom-8 -right-4 md:-right-10 glass rounded-2xl p-6 max-w-xs shadow-soft">
               <div className="font-serif italic text-lg text-foreground leading-snug">
-                &ldquo;The first bite tastes like my ammachi&apos;s kitchen.&rdquo;
+                &ldquo;Rooted in tradition, served with heart.&rdquo;
               </div>
-              <div className="mt-2 text-xs uppercase tracking-widest text-gold">— Reshma, Kochi</div>
+              <div className="mt-2 text-xs uppercase tracking-widest text-gold">— Ela &amp; Co.</div>
             </div>
           </div>
 

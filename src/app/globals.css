@@ -137,10 +137,11 @@
   color: transparent;
 }
 @utility glass {
-  background: color-mix(in oklab, var(--card) 65%, transparent);
+  background: color-mix(in oklab, var(--card) 90%, transparent);
   backdrop-filter: saturate(140%) blur(14px);
   -webkit-backdrop-filter: saturate(140%) blur(14px);
-  border: 1px solid color-mix(in oklab, var(--gold) 20%, transparent);
+  border: 1px solid color-mix(in oklab, var(--gold) 32%, transparent);
+  box-shadow: 0 8px 30px color-mix(in oklab, var(--charcoal) 10%, transparent);
 }
 @utility hairline-gold {
   background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--gold) 70%, transparent), transparent);
