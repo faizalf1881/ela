@@ -61,30 +61,51 @@ export async function sendOtp(phone: string, code: string): Promise<SendResult> 
 
   if (!configured) return { ok: true, via: "console" };
 
-  const payload = template
-    ? {
-        messaging_product: "whatsapp",
-        to: phone,
-        type: "template",
-        template: {
-          name: template,
-          language: { code: lang },
-          components: [
-            { type: "body", parameters: [{ type: "text", text: code }] },
-            { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: code }] },
-          ],
-        },
-      }
-    : {
-        messaging_product: "whatsapp",
-        to: phone,
-        type: "text",
-        text: { body: `Your Ela & Co. verification code is ${code}. It expires in 5 minutes.` },
-      };
+  const bodyOnly = [{ type: "body", parameters: [{ type: "text", text: code }] }];
+  const withButton = [
+    ...bodyOnly,
+    // Only valid when the approved template has a "copy code" / URL button.
+    { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: code }] },
+  ];
 
-  const r = await post(payload);
-  if (!r.ok) return { ok: devMode, via: "whatsapp", error: r.error };
-  return { ok: true, via: "whatsapp" };
+  const tpl = (name: string, code2: string, components: unknown[]) => ({
+    messaging_product: "whatsapp",
+    to: phone,
+    type: "template",
+    template: { name, language: { code: code2 }, components },
+  });
+
+  const plainText = {
+    messaging_product: "whatsapp",
+    to: phone,
+    type: "text",
+    text: { body: `Your Ela & Co. verification code is ${code}. It expires in 5 minutes.` },
+  };
+
+  // Authentication templates differ by whether they carry a copy-code button, and
+  // are approved under either "en" or "en_US". Rather than guessing, try each
+  // shape until WhatsApp accepts one, then fall back to a plain text message.
+  const langs = Array.from(new Set([lang, lang.startsWith("en") ? (lang === "en" ? "en_US" : "en") : "en"]));
+  const attempts: { label: string; payload: Record<string, unknown> }[] = [];
+
+  if (template) {
+    for (const l of langs) {
+      attempts.push({ label: `template ${template}/${l} +button`, payload: tpl(template, l, withButton) });
+      attempts.push({ label: `template ${template}/${l} body-only`, payload: tpl(template, l, bodyOnly) });
+    }
+  }
+  attempts.push({ label: "plain text", payload: plainText });
+
+  let lastError: string | undefined;
+  for (const a of attempts) {
+    const r = await post(a.payload);
+    if (r.ok) return { ok: true, via: "whatsapp" };
+    lastError = `${a.label} → ${r.error}`;
+    // eslint-disable-next-line no-console
+    console.error(`[WhatsApp] attempt failed (${a.label}):`, r.error);
+  }
+
+  return { ok: devMode, via: "whatsapp", error: lastError };
 }
 
 /**

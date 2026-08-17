@@ -49,7 +49,24 @@ export async function POST(req: Request) {
 
   const result = await sendOtp(phone, code);
   if (!result.ok) {
-    return NextResponse.json({ error: "Could not send the code. Try again." }, { status: 502 });
+    // eslint-disable-next-line no-console
+    console.error("[OTP] delivery failed for", phone, "-", result.error);
+    await audit({
+      actor: { type: "system", label: phone },
+      action: "auth.otp_failed",
+      entityType: "auth",
+      summary: `OTP delivery failed for ${phone}`,
+      metadata: { error: result.error ?? null },
+      req,
+    });
+    return NextResponse.json(
+      {
+        error: "Could not send the code. Please try again in a moment.",
+        // Surfaced for the admin audit log / support, not shown to customers.
+        detail: result.error ?? null,
+      },
+      { status: 502 },
+    );
   }
 
   await audit({ actor: { type: "system", label: phone }, action: "auth.otp_requested", entityType: "auth", summary: `OTP sent to ${phone} (${result.via}, ${mode})`, req });
