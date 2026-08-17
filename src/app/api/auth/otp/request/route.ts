@@ -39,7 +39,7 @@ export async function POST(req: Request) {
   }
 
   const code = generateOtp();
-  await prisma.otpCode.create({
+  const otpRow = await prisma.otpCode.create({
     data: {
       phone,
       codeHash: hashOtp(code),
@@ -49,6 +49,9 @@ export async function POST(req: Request) {
 
   const result = await sendOtp(phone, code);
   if (!result.ok) {
+    // Nothing was delivered, so don't let this attempt trip the 30s throttle —
+    // the customer must be able to retry immediately.
+    await prisma.otpCode.delete({ where: { id: otpRow.id } }).catch(() => {});
     // eslint-disable-next-line no-console
     console.error("[OTP] delivery failed for", phone, "-", result.error);
     await audit({
