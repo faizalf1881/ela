@@ -17,11 +17,13 @@ import {
   Printer,
   FileText,
   ScanLine,
+  Camera,
   Download,
 } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
 import { ExportMenu } from "@/components/staff/ExportMenu";
+import { CameraScanner } from "@/components/staff/CameraScanner";
 import {
   KITCHEN_STATUSES,
   STATUS_BADGE,
@@ -60,6 +62,7 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
   const [, setTick] = useState(0); // forces elapsed-time re-render
   const [scan, setScan] = useState("");
   const [scanned, setScanned] = useState<string | null>(null); // highlighted order id
+  const [cameraOpen, setCameraOpen] = useState(false);
 
   const seenRef = useRef<Set<string> | null>(null);
   const mutedRef = useRef(false);
@@ -143,12 +146,10 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
     }
   }
 
-  /** Scanner types the QR contents then presses Enter — look the order up and jump to it. */
-  async function handleScan(e: React.FormEvent) {
-    e.preventDefault();
-    const code = scan.trim();
+  /** Look an order up from a scanned/typed code and jump to it on the board. */
+  async function lookupCode(raw: string) {
+    const code = raw.trim();
     if (!code) return;
-    setScan("");
     try {
       const res = await fetch("/api/orders/scan", {
         method: "POST",
@@ -167,6 +168,14 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "No order matches that code");
     }
+  }
+
+  /** Hardware scanners type the code then press Enter. */
+  async function handleScan(e: React.FormEvent) {
+    e.preventDefault();
+    const code = scan.trim();
+    setScan("");
+    await lookupCode(code);
   }
 
   const visible = useMemo(() => {
@@ -239,6 +248,14 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
               />
             </label>
           </form>
+          <button
+            onClick={() => setCameraOpen(true)}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border hover:bg-muted"
+            title="Scan a label with the device camera"
+            aria-label="Scan with camera"
+          >
+            <Camera className="h-4 w-4" />
+          </button>
           <button onClick={() => setMuted((m) => !m)} className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border hover:bg-muted" title={muted ? "Unmute alerts" : "Mute alerts"}>
             {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
           </button>
@@ -389,6 +406,10 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
           })
         )}
       </div>
+
+      {cameraOpen && (
+        <CameraScanner onCode={(code) => lookupCode(code)} onClose={() => setCameraOpen(false)} />
+      )}
     </div>
   );
 }
