@@ -3,6 +3,7 @@ import "./globals.css";
 import { CartProvider } from "@/lib/cart";
 import { AuthProvider } from "@/lib/auth-client";
 import { CartSheet } from "@/components/site/CartSheet";
+import { PremiumTheme } from "@/components/site/PremiumTheme";
 import { Toaster } from "sonner";
 
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://www.elaandco.com";
@@ -46,6 +47,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <AuthProvider>
+          <PremiumTheme />
           <CartProvider>
             {children}
             <CartSheet />

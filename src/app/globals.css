@@ -149,18 +149,38 @@
 }
 
 /*
- * Premium members get a warmer, gold-leaning surface. Only background/border
- * tokens shift — text tokens stay put so contrast (and readability) is unchanged.
+ * Premium members get a warmer, gold-leaning surface applied site-wide via a
+ * single class on <html>. Only surface/accent tokens shift — text tokens are
+ * untouched so contrast and readability stay exactly as designed.
  */
 .premium {
   --background: color-mix(in oklab, var(--gold) 7%, var(--ivory));
   --card: color-mix(in oklab, var(--gold) 4%, white);
+  --secondary: color-mix(in oklab, var(--gold) 10%, var(--ivory));
+  --muted: color-mix(in oklab, var(--gold) 8%, var(--ivory));
   --border: color-mix(in oklab, var(--gold) 30%, transparent);
+  --input: color-mix(in oklab, var(--gold) 34%, transparent);
   --ring: var(--gold);
+}
+.premium body {
+  background: var(--background);
 }
 .premium .shadow-soft,
 .premium .shadow-elegant {
   box-shadow: 0 10px 40px color-mix(in oklab, var(--gold) 18%, transparent);
+}
+/* A gold hairline under the sticky header ties the theme together. */
+.premium header {
+  border-bottom-color: color-mix(in oklab, var(--gold) 45%, transparent);
+}
+/* Primary actions keep their forest fill (contrast) but gain a gold rim. */
+.premium .bg-primary {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--gold) 55%, transparent),
+    0 6px 20px color-mix(in oklab, var(--gold) 20%, transparent);
+}
+.premium .glass {
+  border-color: color-mix(in oklab, var(--gold) 45%, transparent);
 }
 
 @keyframes float-leaf {
