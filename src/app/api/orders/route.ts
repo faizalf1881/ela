@@ -4,7 +4,7 @@ import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import { razorpay } from "@/lib/razorpay";
 import { effectivePrice } from "@/lib/pricing";
-import { finalizeOrder } from "@/lib/fulfillment";
+import { finalizeOrder, OutOfStockError } from "@/lib/fulfillment";
 import { notifyOrderStatus, notifyNewOrderToAdmin } from "@/lib/notify";
 import { audit, actorFrom } from "@/lib/audit";
 import { evaluateCoupon } from "@/lib/coupon";
@@ -196,12 +196,25 @@ export async function POST(req: Request) {
     req,
   });
 
-  // Cash on delivery with no confirmation fee — finalize immediately (invoice + stock).
+  // Cash on delivery with no confirmation fee — finalize immediately (invoice +
+  // stock). Nothing has been charged yet, so if the last portion went to another
+  // customer in the meantime we roll the order back rather than oversell.
   if (paymentMethod === "cod" && !collectsCodConfirmation) {
-    const order = await finalizeOrder(created.id);
-    await notifyOrderStatus(order);
-    await notifyNewOrderToAdmin(order);
-    return NextResponse.json({ order, paymentMethod: "cod" });
+    try {
+      const order = await finalizeOrder(created.id, { strict: true });
+      await notifyOrderStatus(order);
+      await notifyNewOrderToAdmin(order);
+      return NextResponse.json({ order, paymentMethod: "cod" });
+    } catch (e) {
+      if (e instanceof OutOfStockError) {
+        await prisma.order.delete({ where: { id: created.id } }).catch(() => {});
+        if (appliedCode) {
+          await prisma.coupon.update({ where: { code: appliedCode }, data: { usedCount: { decrement: 1 } } }).catch(() => {});
+        }
+        return NextResponse.json({ error: e.message }, { status: 409 });
+      }
+      throw e;
+    }
   }
 
   // Online payment — full total, or just the COD confirmation slice (amount in paise).

@@ -831,6 +831,41 @@ async function main() {
   const custCron = await customer.fetch("/api/cron/meal-plans", { method: "POST" });
   ok(custCron.status === 401, "customers cannot trigger the generator → 401");
 
+  // ---------- Concurrency: no overselling ----------
+  section("Stock safety under concurrent orders");
+  const scarce = await admin.fetch("/api/menu", {
+    method: "POST",
+    body: JSON.stringify({ name: "E2E Last Portion", price: 100, stock: 1, category: "Test" }),
+  });
+  const scarceItem = (await scarce.json()).item;
+
+  // Five customers grab the last portion at the same instant.
+  const rush = await Promise.all(
+    Array.from({ length: 5 }, () =>
+      customer.fetch("/api/orders", {
+        method: "POST",
+        body: JSON.stringify({
+          items: [{ id: scarceItem.id, qty: 1 }],
+          name: "E2E",
+          phone: "+91" + phone,
+          deliveryLocationId: locationId,
+          ...sched,
+          paymentMethod: "cod",
+        }),
+      }),
+    ),
+  );
+  const accepted = rush.filter((r) => r.status === 200).length;
+  ok(accepted === 1, `only 1 of 5 simultaneous orders accepted for the last portion (got ${accepted})`);
+  ok(rush.filter((r) => r.status === 409).length === 4, "the other four are refused with 409, not oversold");
+
+  const afterRush = await (await new Client().fetch("/api/menu?all=1")).json();
+  const scarceAfter = (await (await admin.fetch("/api/menu?all=1")).json()).items.find((i: { id: string }) => i.id === scarceItem.id);
+  ok(scarceAfter?.stock === 0, `stock lands exactly on 0, never negative (got ${scarceAfter?.stock})`);
+  void afterRush;
+
+  await admin.fetch(`/api/menu/${scarceItem.id}`, { method: "DELETE" });
+
   // ---------- Audit trail ----------
   section("Audit trail");
   const auditRes = await admin.fetch("/api/admin/audit?limit=100");
