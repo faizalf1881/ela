@@ -9,6 +9,7 @@ import { notifyOrderStatus, notifyNewOrderToAdmin } from "@/lib/notify";
 import { audit, actorFrom } from "@/lib/audit";
 import { evaluateCoupon } from "@/lib/coupon";
 import { getMembership } from "@/lib/membership";
+import { assertSlotAvailable, toDbDate } from "@/lib/delivery";
 
 export const runtime = "nodejs";
 
@@ -18,6 +19,8 @@ const bodySchema = z.object({
   phone: z.string().trim().min(6).max(20),
   deliveryLocationId: z.string().trim().min(1),
   couponCode: z.string().trim().max(40).optional(),
+  deliveryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  deliverySlotId: z.string().trim().min(1).optional(),
   paymentMethod: z.enum(["razorpay", "cod"]).default("razorpay"),
 });
 
@@ -38,7 +41,7 @@ export async function GET(req: Request) {
 
   const orders = await prisma.order.findMany({
     where,
-    include: { items: true },
+    include: { items: true, deliverySlot: { select: { id: true, label: true } } },
     orderBy: { createdAt: "desc" },
     take: 200,
   });
@@ -66,7 +69,7 @@ export async function POST(req: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: "Invalid order details" }, { status: 400 });
   }
-  const { items, name, phone, deliveryLocationId, couponCode, paymentMethod } = parsed.data;
+  const { items, name, phone, deliveryLocationId, couponCode, deliveryDate, deliverySlotId, paymentMethod } = parsed.data;
 
   // COD availability is an admin setting — enforce it here, not just in the UI.
   if (paymentMethod === "cod" && setting && !setting.codEnabled) {
@@ -82,6 +85,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Please choose a valid delivery location." }, { status: 400 });
   }
   const address = location.area ? `${location.name}, ${location.area}` : location.name;
+
+  // Pre-order scheduling. Slots are optional only while none are configured, so
+  // an existing shop keeps working until the admin sets its delivery windows up.
+  const slotsConfigured = (await prisma.deliverySlot.count({ where: { active: true } })) > 0;
+  if (slotsConfigured) {
+    if (!deliveryDate || !deliverySlotId) {
+      return NextResponse.json({ error: "Please choose a delivery date and time." }, { status: 400 });
+    }
+    const problem = await assertSlotAvailable(deliveryDate, deliverySlotId, location.id);
+    if (problem) return NextResponse.json({ error: problem }, { status: 409 });
+  }
 
   // Recompute prices & validate stock from the DB — never trust the client.
   const ids = items.map((i) => i.id);
@@ -149,6 +163,8 @@ export async function POST(req: Request) {
       customerPhone: phone,
       address,
       deliveryLocationId: location.id,
+      deliveryDate: deliveryDate ? toDbDate(deliveryDate) : null,
+      deliverySlotId: slotsConfigured ? deliverySlotId : null,
       subtotal,
       discountTotal,
       couponCode: appliedCode,
@@ -176,7 +192,7 @@ export async function POST(req: Request) {
     entityType: "order",
     entityId: created.id,
     summary: `Order placed (₹${total}, ${paymentMethod})`,
-    metadata: { total, subtotal, discountTotal, couponCode: appliedCode, couponDiscount, deliveryFee, location: location.name, paymentMethod, items: lineItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) },
+    metadata: { total, subtotal, discountTotal, couponCode: appliedCode, couponDiscount, deliveryFee, location: location.name, deliveryDate: deliveryDate ?? null, paymentMethod, items: lineItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) },
     req,
   });
 

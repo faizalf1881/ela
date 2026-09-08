@@ -102,6 +102,11 @@ model Order {
   deliveryLocation   DeliveryLocation? @relation(fields: [deliveryLocationId], references: [id])
   deliveryLocationId String?
 
+  /// Pre-order scheduling: the calendar day and time window the customer chose.
+  deliveryDate   DateTime?     @db.Date
+  deliverySlot   DeliverySlot? @relation(fields: [deliverySlotId], references: [id])
+  deliverySlotId String?
+
   items OrderItem[]
 
   subtotal           Int // sum of discounted line prices
@@ -160,6 +165,13 @@ model StoreSetting {
   codEnabled       Boolean @default(true)
   codConfirmAmount Int     @default(0)
 
+  /// Pre-order rules. Orders before the cut-off (minutes past IST midnight —
+  /// 480 = 8:00 AM) can still be delivered the same day; after it, the next
+  /// available day. deliveryDays holds weekday numbers (0 = Sunday).
+  orderCutoffMinutes Int   @default(480)
+  deliveryDays       Int[] @default([1, 2, 3, 4, 5, 6])
+  maxPreorderDays    Int   @default(7)
+
   updatedAt DateTime @updatedAt
 }
 
@@ -205,6 +217,37 @@ model DeliveryLocation {
   createdAt   DateTime @default(now())
 
   orders Order[]
+}
+
+/// A delivery time window (e.g. 12:30 PM - 1:00 PM), admin-managed.
+model DeliverySlot {
+  id           String   @id @default(cuid())
+  label        String // shown to the customer
+  startMinutes Int // minutes past midnight, used for ordering + same-day checks
+  endMinutes   Int
+  active       Boolean  @default(true)
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  orders Order[]
+  blocks SlotBlock[]
+
+  @@index([active])
+}
+
+/// Temporarily closes one slot for a given date (optionally only in one area),
+/// e.g. when the kitchen hits capacity. Absence of a row means "available".
+model SlotBlock {
+  id         String       @id @default(cuid())
+  slot       DeliverySlot @relation(fields: [slotId], references: [id], onDelete: Cascade)
+  slotId     String
+  date       DateTime     @db.Date
+  locationId String? // null = blocked everywhere that day
+  reason     String?
+  createdAt  DateTime     @default(now())
+
+  @@unique([slotId, date, locationId])
+  @@index([date])
 }
 
 enum DiscountType {

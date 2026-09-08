@@ -166,6 +166,21 @@ async function main() {
   await prisma.counter.upsert({ where: { name: "ticket" }, update: {}, create: { name: "ticket", value: 0 } });
   console.log("✓ Ticket counter ready");
 
+  // ---- Delivery time slots (lunch service) ----
+  const slotCount = await prisma.deliverySlot.count();
+  if (slotCount === 0) {
+    await prisma.deliverySlot.createMany({
+      data: [
+        { label: "12:30 PM - 1:00 PM", startMinutes: 750, endMinutes: 780, sortOrder: 1 },
+        { label: "1:00 PM - 1:30 PM", startMinutes: 780, endMinutes: 810, sortOrder: 2 },
+        { label: "1:30 PM - 2:00 PM", startMinutes: 810, endMinutes: 840, sortOrder: 3 },
+      ],
+    });
+    console.log("✓ Seeded 3 delivery time slots");
+  } else {
+    console.log(`• ${slotCount} delivery slots already exist - skipping`);
+  }
+
   // ---- Membership plans ----
   // Seeded inactive: the admin edits the pricing/benefits, then flips them live.
   // (Going live also needs Subscriptions enabled on the Razorpay account.)

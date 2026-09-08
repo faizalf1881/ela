@@ -14,7 +14,7 @@ export default async function InvoicePage({ params }: { params: Promise<{ id: st
   const s = await getSession();
   if (!s) redirect(`/login?next=/orders/${id}/invoice`);
 
-  const order = await prisma.order.findUnique({ where: { id }, include: { items: true } });
+  const order = await prisma.order.findUnique({ where: { id }, include: { items: true, deliverySlot: true } });
   if (!order) notFound();
   if (s.role === "customer" && order.customerId !== s.sub) redirect("/orders");
 
@@ -66,6 +66,12 @@ export default async function InvoicePage({ params }: { params: Promise<{ id: st
               <div className="mt-1">#{order.id.slice(-6).toUpperCase()}</div>
               <div className="text-black/70">Status: {STATUS_LABEL[order.status as OrderStatus]}</div>
               <div className="text-black/70">Payment: {order.paymentMethod === "cod" ? "Cash on Delivery" : "Online (Razorpay)"}</div>
+              {order.deliveryDate && (
+                <div className="text-black/70">
+                  Delivery: {new Date(order.deliveryDate).toLocaleDateString("en-IN", { timeZone: "UTC", day: "numeric", month: "short" })}
+                  {order.deliverySlot ? ` · ${order.deliverySlot.label}` : ""}
+                </div>
+              )}
             </div>
           </div>
 
@@ -106,6 +112,15 @@ export default async function InvoicePage({ params }: { params: Promise<{ id: st
               <span>Total</span>
               <span>{inr(order.total)}</span>
             </div>
+            {order.codBalanceDue > 0 && (
+              <>
+                <Row label="Paid online (confirmation)" value={inr(order.codConfirmPaid)} green />
+                <div className="flex items-center justify-between font-medium">
+                  <span>Balance due on delivery</span>
+                  <span>{inr(order.codBalanceDue)}</span>
+                </div>
+              </>
+            )}
           </div>
 
           <div className="mt-8 border-t border-black/10 pt-4 text-center text-xs text-black/50">

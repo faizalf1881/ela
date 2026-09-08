@@ -247,6 +247,13 @@ async function main() {
   const gc = await goodCoupon.json();
   ok(gc.ok === true && gc.discount === 50, `valid coupon → ₹${gc.discount} off 500`);
 
+  // Slots are seeded, so every order below must carry a delivery date + slot.
+  const availEarly = await (await new Client().fetch(`/api/delivery/availability?locationId=${locationId}`)).json();
+  const sched: { deliveryDate?: string; deliverySlotId?: string } =
+    availEarly.days?.[0]?.slots?.[0]
+      ? { deliveryDate: availEarly.days[0].date, deliverySlotId: availEarly.days[0].slots[0].id }
+      : {};
+
   // ---------- Razorpay order + verify ----------
   section("Order + Razorpay create + signature verify");
   const orderItems = [
@@ -255,7 +262,7 @@ async function main() {
   ];
   const orderRes = await customer.fetch("/api/orders", {
     method: "POST",
-    body: JSON.stringify({ items: orderItems, name: "E2E Customer", phone: "+91" + phone, deliveryLocationId: locationId, couponCode, paymentMethod: "razorpay" }),
+    body: JSON.stringify({ items: orderItems, name: "E2E Customer", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, couponCode, paymentMethod: "razorpay" }),
   });
   const orderData = await orderRes.json();
   ok(orderRes.status === 200, `create razorpay order → 200 ${orderRes.status !== 200 ? JSON.stringify(orderData) : ""}`);
@@ -300,7 +307,7 @@ async function main() {
   // add testItem to menu availability check: order the test dish (stock 10) via COD
   const codRes = await customer.fetch("/api/orders", {
     method: "POST",
-    body: JSON.stringify({ items: [{ id: testItem.id, qty: 3 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
+    body: JSON.stringify({ items: [{ id: testItem.id, qty: 3 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: "cod" }),
   });
   const cod = await codRes.json();
   ok(codRes.status === 200 && cod.paymentMethod === "cod", "COD order placed → 200");
@@ -322,7 +329,7 @@ async function main() {
   await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ acceptingOrders: false }) });
   const closedOrder = await customer.fetch("/api/orders", {
     method: "POST",
-    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: "cod" }),
   });
   ok(closedOrder.status === 403, "orders blocked when store closed → 403");
   await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ acceptingOrders: true }) });
@@ -465,7 +472,7 @@ async function main() {
 
   const memberOrder = await customer.fetch("/api/orders", {
     method: "POST",
-    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E Member", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E Member", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: "cod" }),
   });
   const mo = await memberOrder.json();
   ok(memberOrder.status === 200, "member places order → 200");
@@ -514,6 +521,67 @@ async function main() {
   const tDel = await admin.fetch(`/api/plans/${tId}`, { method: "DELETE" });
   ok(tDel.status === 200 && (await tDel.json()).ok === true, "unused plan is hard-deleted");
 
+  // ---------- Pre-order: delivery date + time slots (#34) ----------
+  section("Pre-order delivery scheduling");
+  const avail = await (await new Client().fetch(`/api/delivery/availability?locationId=${locationId}`)).json();
+  ok(Array.isArray(avail.days), "availability returns a list of days");
+  ok(avail.days.length > 0, `${avail.days.length} delivery day(s) offered`);
+  ok(typeof avail.cutoffMinutes === "number", `cut-off exposed (${avail.cutoffMinutes} min past midnight)`);
+  const firstDay = avail.days[0];
+  ok(firstDay.slots.length > 0, `first day has ${firstDay?.slots?.length} slot(s)`);
+
+  // Same-day is only allowed before the cut-off.
+  const todayOffered = avail.days.some((d: { isToday: boolean }) => d.isToday);
+  ok(avail.cutoffPassed ? !todayOffered : true, avail.cutoffPassed ? "after cut-off: same-day withdrawn" : "before cut-off: same-day may be offered");
+
+  // Scheduling is required once slots exist.
+  const noSchedule = await customer.fetch("/api/orders", {
+    method: "POST",
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
+  });
+  ok(noSchedule.status === 400, "order without a date/slot is rejected → 400");
+
+  const badSlot = await customer.fetch("/api/orders", {
+    method: "POST",
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, deliveryDate: firstDay.date, deliverySlotId: "does-not-exist", paymentMethod: "cod" }),
+  });
+  ok(badSlot.status === 409, "unknown slot rejected → 409");
+
+  const pastDate = await customer.fetch("/api/orders", {
+    method: "POST",
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, deliveryDate: "2020-01-01", deliverySlotId: firstDay.slots[0].id, paymentMethod: "cod" }),
+  });
+  ok(pastDate.status === 409, "past delivery date rejected → 409");
+
+  const scheduled = await customer.fetch("/api/orders", {
+    method: "POST",
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, deliveryDate: firstDay.date, deliverySlotId: firstDay.slots[0].id, paymentMethod: "cod" }),
+  });
+  const sch = await scheduled.json();
+  ok(scheduled.status === 200, "scheduled order accepted");
+  ok(String(sch.order?.deliveryDate ?? "").startsWith(firstDay.date), "order stores the chosen delivery date");
+  ok(sch.order?.deliverySlotId === firstDay.slots[0].id, "order stores the chosen slot");
+
+  // Admin closes that slot for that date; it must disappear and be refused.
+  const blocked = await admin.fetch(`/api/slots/${firstDay.slots[0].id}`, { method: "PATCH", body: JSON.stringify({ block: { date: firstDay.date, reason: "capacity" } }) });
+  ok(blocked.status === 200, "admin closes a slot for one date");
+  const avail2 = await (await new Client().fetch(`/api/delivery/availability?locationId=${locationId}`)).json();
+  const day2 = avail2.days.find((d: { date: string }) => d.date === firstDay.date);
+  ok(!day2 || !day2.slots.some((sl: { id: string }) => sl.id === firstDay.slots[0].id), "closed slot no longer offered");
+  const afterBlock = await customer.fetch("/api/orders", {
+    method: "POST",
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, deliveryDate: firstDay.date, deliverySlotId: firstDay.slots[0].id, paymentMethod: "cod" }),
+  });
+  ok(afterBlock.status === 409, "ordering into a closed slot is refused → 409");
+
+  const unblocked = await admin.fetch(`/api/slots/${firstDay.slots[0].id}`, { method: "PATCH", body: JSON.stringify({ unblock: { date: firstDay.date } }) });
+  ok(unblocked.status === 200, "admin reopens the slot");
+
+  const custSlot = await customer.fetch("/api/slots", { method: "POST", body: JSON.stringify({ label: "hack", startMinutes: 60, endMinutes: 120 }) });
+  ok(custSlot.status === 403, "customers cannot create slots → 403");
+  const badRange = await admin.fetch("/api/slots", { method: "POST", body: JSON.stringify({ label: "bad", startMinutes: 600, endMinutes: 500 }) });
+  ok(badRange.status === 400, "end-before-start slot rejected → 400");
+
   // ---------- Cash on Delivery controls (#24 / #25) ----------
   section("Cash on Delivery controls");
   const codOff = await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ codEnabled: false }) });
@@ -524,7 +592,7 @@ async function main() {
 
   const codBlocked = await customer.fetch("/api/orders", {
     method: "POST",
-    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, deliveryDate: firstDay.date, deliverySlotId: firstDay.slots[0].id, paymentMethod: "cod" }),
   });
   ok(codBlocked.status === 403, "COD order rejected server-side while disabled → 403");
 
@@ -534,7 +602,7 @@ async function main() {
 
   const codPartial = await customer.fetch("/api/orders", {
     method: "POST",
-    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, deliveryDate: firstDay.date, deliverySlotId: firstDay.slots[0].id, paymentMethod: "cod" }),
   });
   const cp = await codPartial.json();
   ok(codPartial.status === 200, "COD order with confirmation amount accepted");
@@ -548,7 +616,7 @@ async function main() {
   ok(zeroConfirm.status === 200, "admin clears the confirmation amount");
   const plainCod = await customer.fetch("/api/orders", {
     method: "POST",
-    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, deliveryDate: firstDay.date, deliverySlotId: firstDay.slots[0].id, paymentMethod: "cod" }),
   });
   const pc = await plainCod.json();
   ok(plainCod.status === 200 && pc.paymentMethod === "cod", "plain COD still works when no confirmation amount is set");

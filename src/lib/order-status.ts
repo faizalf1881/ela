@@ -51,6 +51,9 @@ export type OrderDTO = {
   total: number;
   status: OrderStatus;
   paymentMethod: string;
-  paymentStatus: "UNPAID" | "PAID" | "FAILED";
+  paymentStatus: "UNPAID" | "PARTIAL" | "PAID" | "FAILED";
+  codBalanceDue?: number;
+  deliveryDate?: string | null;
+  deliverySlot?: { id: string; label: string } | null;
   createdAt: string;
 };

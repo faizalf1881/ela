@@ -22,6 +22,9 @@ export async function GET() {
     // Checkout uses these to show/hide COD and its confirmation amount.
     codEnabled: s?.codEnabled ?? true,
     codConfirmAmount: s?.codConfirmAmount ?? 0,
+    orderCutoffMinutes: s?.orderCutoffMinutes ?? 480,
+    deliveryDays: s?.deliveryDays ?? [1, 2, 3, 4, 5, 6],
+    maxPreorderDays: s?.maxPreorderDays ?? 7,
   });
 }
 
@@ -30,6 +33,9 @@ const schema = z.object({
   closedMessage: z.string().max(300).nullable().optional(),
   codEnabled: z.boolean().optional(),
   codConfirmAmount: z.number().int().min(0).max(100000).optional(),
+  orderCutoffMinutes: z.number().int().min(0).max(1439).optional(),
+  deliveryDays: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+  maxPreorderDays: z.number().int().min(1).max(60).optional(),
 });
 
 // PATCH /api/settings — admin only.
@@ -65,5 +71,8 @@ export async function PATCH(req: Request) {
     closedMessage: s.closedMessage,
     codEnabled: s.codEnabled,
     codConfirmAmount: s.codConfirmAmount,
+    orderCutoffMinutes: s.orderCutoffMinutes,
+    deliveryDays: s.deliveryDays,
+    maxPreorderDays: s.maxPreorderDays,
   });
 }

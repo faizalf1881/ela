@@ -33,6 +33,8 @@ type RazorpayResponse = {
 };
 
 type Location = { id: string; name: string; area: string | null; deliveryFee: number };
+type Slot = { id: string; label: string };
+type Day = { date: string; label: string; isToday: boolean; slots: Slot[] };
 type Applied = { code: string; discount: number; label: string };
 
 declare global {
@@ -57,8 +59,10 @@ export default function CheckoutPage() {
   const router = useRouter();
   const { items, setQty, remove, subtotal, clear, count } = useCart();
   const { user, membership, loading: authLoading } = useAuth();
-  const [form, setForm] = useState({ name: "", phone: "", locationId: "", method: "razorpay" as "razorpay" | "cod" });
+  const [form, setForm] = useState({ name: "", phone: "", locationId: "", date: "", slotId: "", method: "razorpay" as "razorpay" | "cod" });
   const [locations, setLocations] = useState<Location[]>([]);
+  const [days, setDays] = useState<Day[]>([]);
+  const [slotsConfigured, setSlotsConfigured] = useState(false);
   const [couponInput, setCouponInput] = useState("");
   const [applied, setApplied] = useState<Applied | null>(null);
   const [couponBusy, setCouponBusy] = useState(false);
@@ -88,6 +92,25 @@ export default function CheckoutPage() {
       .then((d) => setLocations(d.locations || []))
       .catch(() => {});
   }, []);
+
+  // Delivery dates/slots depend on the chosen area and the current time.
+  useEffect(() => {
+    const qs = form.locationId ? `?locationId=${encodeURIComponent(form.locationId)}` : "";
+    fetch(`/api/delivery/availability${qs}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d: { days: Day[] }) => {
+        const list = d.days || [];
+        setDays(list);
+        setSlotsConfigured(list.some((x) => x.slots.length > 0));
+        // Keep the selection only while it is still offered.
+        setForm((f) => {
+          const day = list.find((x) => x.date === f.date);
+          if (!day) return { ...f, date: list[0]?.date ?? "", slotId: "" };
+          return day.slots.some((sl) => sl.id === f.slotId) ? f : { ...f, slotId: "" };
+        });
+      })
+      .catch(() => {});
+  }, [form.locationId]);
 
   // Auto-fill from the logged-in customer's profile — no need to re-enter (spec #16).
   useEffect(() => {
@@ -157,6 +180,7 @@ export default function CheckoutPage() {
     }
     if (!form.name || !form.phone) return toast.error("Please fill your name and phone");
     if (!form.locationId) return toast.error("Please choose a delivery location");
+    if (slotsConfigured && (!form.date || !form.slotId)) return toast.error("Please choose a delivery date and time");
 
     setBusy(true);
     let modalOpened = false;
@@ -169,6 +193,8 @@ export default function CheckoutPage() {
           name: form.name,
           phone: form.phone,
           deliveryLocationId: form.locationId,
+          deliveryDate: form.date || undefined,
+          deliverySlotId: form.slotId || undefined,
           couponCode: applied?.code,
           paymentMethod: form.method,
         }),
@@ -375,6 +401,50 @@ export default function CheckoutPage() {
                       <p className="mt-1 text-xs text-muted-foreground">No delivery areas configured yet.</p>
                     )}
                   </label>
+
+                  {/* Pre-order: delivery date, then the time window (spec #34) */}
+                  {slotsConfigured && (
+                    <>
+                      <div>
+                        <div className="text-xs text-muted-foreground mb-1">Delivery date</div>
+                        <div className="flex flex-wrap gap-2">
+                          {days.map((d) => (
+                            <button
+                              key={d.date}
+                              type="button"
+                              onClick={() => setForm({ ...form, date: d.date, slotId: "" })}
+                              className={`rounded-xl border px-3 py-2 text-xs transition-colors ${
+                                form.date === d.date ? "border-forest bg-forest/5 text-foreground" : "border-border hover:border-forest/40 text-foreground/80"
+                              }`}
+                            >
+                              {d.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="text-xs text-muted-foreground mb-1">Delivery time</div>
+                        <div className="flex flex-wrap gap-2">
+                          {(days.find((d) => d.date === form.date)?.slots ?? []).map((sl) => (
+                            <button
+                              key={sl.id}
+                              type="button"
+                              onClick={() => setForm({ ...form, slotId: sl.id })}
+                              className={`rounded-xl border px-3 py-2 text-xs transition-colors ${
+                                form.slotId === sl.id ? "border-forest bg-forest/5 text-foreground" : "border-border hover:border-forest/40 text-foreground/80"
+                              }`}
+                            >
+                              {sl.label}
+                            </button>
+                          ))}
+                          {form.date && (days.find((d) => d.date === form.date)?.slots.length ?? 0) === 0 && (
+                            <p className="text-xs text-muted-foreground">No times left for this day.</p>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 {/* Coupon — immediately before payment (spec #13) */}
@@ -436,6 +506,15 @@ export default function CheckoutPage() {
 
               <div className="rounded-3xl border border-border bg-card p-6 shadow-soft">
                 <h2 className="font-serif text-2xl text-foreground">Order summary</h2>
+                {slotsConfigured && form.date && form.slotId && (
+                  <div className="mt-4 rounded-xl border border-border bg-background px-3 py-2.5 text-xs text-foreground">
+                    <div className="text-muted-foreground mb-1">Delivering</div>
+                    {days.find((d) => d.date === form.date)?.label}
+                    {selectedLocation ? ` · ${selectedLocation.name}` : ""}
+                    {" · "}
+                    {days.find((d) => d.date === form.date)?.slots.find((sl) => sl.id === form.slotId)?.label}
+                  </div>
+                )}
                 <dl className="mt-4 space-y-2 text-sm">
                   <Row label="Subtotal" value={inr(subtotal)} />
                   {membershipDiscount > 0 && <Row label={`${membership.planName} member (${membership.discountPercent}%)`} value={`- ${inr(membershipDiscount)}`} green />}
