@@ -70,7 +70,8 @@ model MenuItem {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
-  orderItems OrderItem[]
+  orderItems    OrderItem[]
+  planMealItems PlanMealItem[]
 }
 
 enum OrderStatus {
@@ -107,6 +108,10 @@ model Order {
   deliverySlot   DeliverySlot? @relation(fields: [deliverySlotId], references: [id])
   deliverySlotId String?
 
+  /// Set when this order was generated automatically from a meal plan.
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id])
+  subscriptionId String?
+
   items OrderItem[]
 
   subtotal           Int // sum of discounted line prices
@@ -136,6 +141,7 @@ model Order {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([subscriptionId, deliveryDate])
   @@index([status])
   @@index([customerId])
 }
@@ -216,7 +222,8 @@ model DeliveryLocation {
   sortOrder   Int      @default(0)
   createdAt   DateTime @default(now())
 
-  orders Order[]
+  orders        Order[]
+  subscriptions Subscription[]
 }
 
 /// A delivery time window (e.g. 12:30 PM - 1:00 PM), admin-managed.
@@ -229,8 +236,9 @@ model DeliverySlot {
   sortOrder    Int      @default(0)
   createdAt    DateTime @default(now())
 
-  orders Order[]
-  blocks SlotBlock[]
+  orders        Order[]
+  blocks        SlotBlock[]
+  subscriptions Subscription[]
 
   @@index([active])
 }
@@ -325,6 +333,13 @@ enum PlanInterval {
   YEARLY
 }
 
+/// DISCOUNT = perks on normal orders. MEAL = a prepaid meal plan that also
+/// auto-generates a daily order for the subscriber.
+enum PlanKind {
+  DISCOUNT
+  MEAL
+}
+
 /// Membership plans customers can subscribe to (admin-managed).
 model SubscriptionPlan {
   id              String       @id @default(cuid())
@@ -342,7 +357,26 @@ model SubscriptionPlan {
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
 
+  /// Meal-plan configuration (only meaningful when kind = MEAL).
+  kind         PlanKind @default(DISCOUNT)
+  serviceDays  Int[]    @default([1, 2, 3, 4, 5, 6]) // weekdays orders are generated (0 = Sunday)
+  durationDays Int? // service window length; null = until cancelled
+
+  mealItems     PlanMealItem[]
   subscriptions Subscription[]
+}
+
+/// The dish(es) delivered on each service day of a meal plan. Multiple rows make
+/// up a combination / meal package.
+model PlanMealItem {
+  id         String           @id @default(cuid())
+  plan       SubscriptionPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  planId     String
+  menuItem   MenuItem         @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  menuItemId String
+  qty        Int              @default(1)
+
+  @@unique([planId, menuItemId])
 }
 
 enum SubscriptionStatus {
@@ -368,6 +402,16 @@ model Subscription {
   startedAt   DateTime?
   currentEnd  DateTime? // next renewal date
   cancelledAt DateTime?
+
+  /// Meal-plan service window + standing delivery preferences for auto orders.
+  startDate          DateTime?         @db.Date
+  endDate            DateTime?         @db.Date
+  deliveryLocation   DeliveryLocation? @relation(fields: [deliveryLocationId], references: [id])
+  deliveryLocationId String?
+  deliverySlot       DeliverySlot?     @relation(fields: [deliverySlotId], references: [id])
+  deliverySlotId     String?
+
+  orders Order[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

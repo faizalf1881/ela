@@ -55,5 +55,7 @@ export type OrderDTO = {
   codBalanceDue?: number;
   deliveryDate?: string | null;
   deliverySlot?: { id: string; label: string } | null;
+  source?: string;
+  subscriptionId?: string | null;
   createdAt: string;
 };

@@ -18,6 +18,8 @@ import {
   FileText,
   ScanLine,
   Camera,
+  Repeat,
+  CalendarClock,
   Download,
 } from "lucide-react";
 import { inr } from "@/lib/utils";
@@ -38,6 +40,7 @@ const FILTERS: { key: string; label: string; match: (o: OrderDTO) => boolean }[]
   { key: "PREPARING", label: "Preparing", match: (o) => o.status === "PREPARING" },
   { key: "OUT_FOR_DELIVERY", label: "On the way", match: (o) => o.status === "OUT_FOR_DELIVERY" },
   { key: "DELIVERED", label: "Delivered", match: (o) => o.status === "DELIVERED" },
+  { key: "subscription", label: "Subscription", match: (o) => o.source === "subscription" },
   { key: "all", label: "All", match: () => true },
 ];
 
@@ -315,7 +318,14 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <div className="font-serif text-lg text-foreground">#{o.id.slice(-6).toUpperCase()}</div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-serif text-lg text-foreground">#{o.id.slice(-6).toUpperCase()}</span>
+                      {o.source === "subscription" && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-gold/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-foreground" title="Generated automatically from a meal plan">
+                          <Repeat className="h-3 w-3" /> Subscription
+                        </span>
+                      )}
+                    </div>
                     <div className={`mt-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${urgency}`}>
                       <Clock className="h-3 w-3" /> {mins === 0 ? "just now" : `${mins} min ago`}
                     </div>
@@ -340,6 +350,15 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
                   <div className="flex items-start gap-2">
                     <MapPin className="h-3.5 w-3.5 mt-0.5 shrink-0" /> <span>{o.address}</span>
                   </div>
+                  {(o.deliveryDate || o.deliverySlot) && (
+                    <div className="flex items-start gap-2 text-foreground">
+                      <CalendarClock className="h-3.5 w-3.5 mt-0.5 shrink-0 text-forest" />
+                      <span>
+                        {o.deliveryDate ? new Date(o.deliveryDate).toLocaleDateString("en-IN", { timeZone: "UTC", day: "numeric", month: "short" }) : ""}
+                        {o.deliverySlot ? ` · ${o.deliverySlot.label}` : ""}
+                      </span>
+                    </div>
+                  )}
                   {o.notes && (
                     <div className="flex items-start gap-2 text-foreground">
                       <StickyNote className="h-3.5 w-3.5 mt-0.5 shrink-0 text-gold" /> <span>{o.notes}</span>

@@ -2,11 +2,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Eye, EyeOff, X, Save, Loader2, Crown, AlertTriangle, Download, Users } from "lucide-react";
+import { Plus, Pencil, Trash2, Eye, EyeOff, X, Save, Loader2, Crown, AlertTriangle, Download, Users, PlayCircle, UtensilsCrossed } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
 import { ExportMenu } from "@/components/staff/ExportMenu";
 
+type MenuLite = { id: string; name: string; price: number };
+type MealItem = { menuItemId: string; qty: number; menuItem: MenuLite };
 type Plan = {
   id: string;
   name: string;
@@ -20,6 +22,10 @@ type Plan = {
   active: boolean;
   sortOrder: number;
   razorpayPlanId: string | null;
+  kind: "DISCOUNT" | "MEAL";
+  serviceDays: number[];
+  durationDays: number | null;
+  mealItems: MealItem[];
 };
 
 type Sub = {
@@ -45,6 +51,10 @@ type Draft = {
   benefits: string;
   active: boolean;
   sortOrder: string;
+  kind: "DISCOUNT" | "MEAL";
+  serviceDays: number[];
+  durationDays: string;
+  mealItems: { menuItemId: string; qty: number }[];
 };
 
 const BLANK: Draft = {
@@ -58,7 +68,13 @@ const BLANK: Draft = {
   benefits: "",
   active: true,
   sortOrder: "0",
+  kind: "DISCOUNT",
+  serviceDays: [1, 2, 3, 4, 5, 6],
+  durationDays: "",
+  mealItems: [],
 };
+
+const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 const STATUS_CLS: Record<string, string> = {
   ACTIVE: "bg-forest/10 text-forest",
@@ -72,17 +88,21 @@ export function PlanManager() {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [subs, setSubs] = useState<Sub[]>([]);
   const [loading, setLoading] = useState(true);
+  const [menu, setMenu] = useState<MenuLite[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const [p, s] = await Promise.all([
+      const [p, s, m] = await Promise.all([
         fetch("/api/plans?all=1", { cache: "no-store" }).then((r) => r.json()),
         fetch("/api/subscriptions", { cache: "no-store" }).then((r) => r.json()),
+        fetch("/api/menu?all=1", { cache: "no-store" }).then((r) => r.json()),
       ]);
       setPlans(p.plans || []);
       setSubs(s.subscriptions || []);
+      setMenu((m.items || []).map((x: MenuLite) => ({ id: x.id, name: x.name, price: x.price })));
     } finally {
       setLoading(false);
     }
@@ -96,9 +116,15 @@ export function PlanManager() {
     if (!draft) return;
     if (!draft.name.trim()) return toast.error("Plan name is required");
     if (!Number(draft.price)) return toast.error("Enter a price");
+    if (draft.kind === "MEAL" && draft.mealItems.length === 0) return toast.error("Pick at least one dish for the meal plan");
+    if (draft.kind === "MEAL" && draft.serviceDays.length === 0) return toast.error("Pick at least one service day");
     setSaving(true);
     try {
       const payload = {
+        kind: draft.kind,
+        serviceDays: draft.serviceDays,
+        durationDays: draft.durationDays.trim() === "" ? null : Number(draft.durationDays),
+        mealItems: draft.kind === "MEAL" ? draft.mealItems : [],
         name: draft.name.trim(),
         description: draft.description.trim(),
         price: Number(draft.price),
@@ -123,6 +149,23 @@ export function PlanManager() {
       toast.error(err instanceof Error ? err.message : "Save failed");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function runGenerator() {
+    setRunning(true);
+    try {
+      const res = await fetch("/api/cron/meal-plans", { method: "POST" });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || "Could not run");
+      toast.success(`${d.created.length} meal order(s) created for ${d.date}`, {
+        description: d.skipped.length ? `${d.skipped.length} subscription(s) skipped` : undefined,
+      });
+      load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not run");
+    } finally {
+      setRunning(false);
     }
   }
 
@@ -172,6 +215,14 @@ export function PlanManager() {
             <Download className="h-4 w-4" /> Quick CSV
           </button>
           <ExportMenu type="subscriptions" label="Export all" />
+          <button
+            onClick={runGenerator}
+            disabled={running}
+            title="Create today's meal-plan orders now (runs automatically each morning)"
+            className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2.5 text-sm hover:bg-muted disabled:opacity-60"
+          >
+            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />} Generate today
+          </button>
           <button onClick={() => setDraft({ ...BLANK, sortOrder: String(plans.length + 1) })} className="inline-flex items-center gap-2 rounded-full bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90">
             <Plus className="h-4 w-4" /> New plan
           </button>
@@ -209,6 +260,20 @@ export function PlanManager() {
                   <div className="mt-1 text-xs text-muted-foreground">
                     {subs.filter((s) => s.status === "ACTIVE" && s.plan.name === p.name).length} active member(s)
                   </div>
+                  {p.kind === "MEAL" && (
+                    <div className="mt-2 rounded-lg bg-forest/5 px-2.5 py-2 text-[11px] text-foreground">
+                      <div className="flex items-center gap-1.5 font-medium">
+                        <UtensilsCrossed className="h-3 w-3 text-forest" /> Auto-ordering meal plan
+                      </div>
+                      <div className="mt-1 text-muted-foreground">
+                        {p.mealItems.map((mi) => `${mi.qty}x ${mi.menuItem.name}`).join(", ") || "no dishes set"}
+                      </div>
+                      <div className="mt-0.5 text-muted-foreground">
+                        {DAY_LABELS.filter((_, i) => p.serviceDays?.includes(i)).join(" ")}
+                        {p.durationDays ? ` - ${p.durationDays} days` : ""}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -238,6 +303,10 @@ export function PlanManager() {
                       benefits: p.benefits.join("\n"),
                       active: p.active,
                       sortOrder: String(p.sortOrder),
+                      kind: p.kind,
+                      serviceDays: p.serviceDays ?? [1, 2, 3, 4, 5, 6],
+                      durationDays: p.durationDays ? String(p.durationDays) : "",
+                      mealItems: (p.mealItems ?? []).map((mi) => ({ menuItemId: mi.menuItemId, qty: mi.qty })),
                     })
                   }
                   className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs hover:bg-muted"
@@ -323,6 +392,109 @@ export function PlanManager() {
                 <input type="checkbox" checked={draft.freeDelivery} onChange={(e) => setDraft({ ...draft, freeDelivery: e.target.checked })} className="h-4 w-4" />
                 Free delivery on every order
               </label>
+              {/* Plan kind: perks only, or an auto-ordering meal plan */}
+              <div>
+                <span className="text-xs text-muted-foreground">Plan type</span>
+                <div className="mt-1 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setDraft({ ...draft, kind: "DISCOUNT" })}
+                    className={`rounded-xl border px-3 py-2.5 text-left text-xs ${draft.kind === "DISCOUNT" ? "border-forest bg-forest/5" : "border-border hover:border-forest/40"}`}
+                  >
+                    <div className="font-medium text-foreground">Discount membership</div>
+                    <div className="text-muted-foreground">Perks on orders they place</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDraft({ ...draft, kind: "MEAL" })}
+                    className={`rounded-xl border px-3 py-2.5 text-left text-xs ${draft.kind === "MEAL" ? "border-forest bg-forest/5" : "border-border hover:border-forest/40"}`}
+                  >
+                    <div className="font-medium text-foreground">Meal plan</div>
+                    <div className="text-muted-foreground">Delivers automatically each day</div>
+                  </button>
+                </div>
+              </div>
+
+              {draft.kind === "MEAL" && (
+                <div className="space-y-3 rounded-xl border border-forest/30 bg-forest/5 p-3">
+                  <div>
+                    <span className="text-xs text-muted-foreground">Dishes delivered each service day</span>
+                    <div className="mt-1 space-y-1.5 max-h-44 overflow-y-auto">
+                      {menu.length === 0 && <p className="text-xs text-muted-foreground">No menu items yet.</p>}
+                      {menu.map((m) => {
+                        const picked = draft.mealItems.find((x) => x.menuItemId === m.id);
+                        return (
+                          <div key={m.id} className="flex items-center gap-2">
+                            <label className="flex flex-1 items-center gap-2 text-xs text-foreground">
+                              <input
+                                type="checkbox"
+                                checked={!!picked}
+                                onChange={(e) =>
+                                  setDraft({
+                                    ...draft,
+                                    mealItems: e.target.checked
+                                      ? [...draft.mealItems, { menuItemId: m.id, qty: 1 }]
+                                      : draft.mealItems.filter((x) => x.menuItemId !== m.id),
+                                  })
+                                }
+                                className="h-3.5 w-3.5"
+                              />
+                              {m.name} <span className="text-muted-foreground">{inr(m.price)}</span>
+                            </label>
+                            {picked && (
+                              <input
+                                type="number"
+                                min={1}
+                                value={picked.qty}
+                                onChange={(e) =>
+                                  setDraft({
+                                    ...draft,
+                                    mealItems: draft.mealItems.map((x) => (x.menuItemId === m.id ? { ...x, qty: Math.max(1, Number(e.target.value) || 1) } : x)),
+                                  })
+                                }
+                                className="w-14 rounded-lg border border-input bg-background px-2 py-1 text-xs"
+                              />
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div>
+                    <span className="text-xs text-muted-foreground">Service days (orders are generated on these days)</span>
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {DAY_LABELS.map((d, i) => {
+                        const on = draft.serviceDays.includes(i);
+                        return (
+                          <button
+                            key={d}
+                            type="button"
+                            onClick={() =>
+                              setDraft({
+                                ...draft,
+                                serviceDays: on ? draft.serviceDays.filter((x) => x !== i) : [...draft.serviceDays, i].sort(),
+                              })
+                            }
+                            className={`rounded-full px-3 py-1.5 text-xs ${on ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}
+                          >
+                            {d}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <Field
+                    label="Duration in days (blank = until cancelled)"
+                    type="number"
+                    value={draft.durationDays}
+                    onChange={(v) => setDraft({ ...draft, durationDays: v })}
+                    placeholder="30"
+                  />
+                </div>
+              )}
+
               <label className="block">
                 <span className="text-xs text-muted-foreground">Extra benefits (one per line)</span>
                 <textarea value={draft.benefits} onChange={(e) => setDraft({ ...draft, benefits: e.target.value })} rows={4} placeholder={"Priority kitchen slot\nEarly access to festival menus"} className="mt-1 w-full rounded-xl border border-input bg-background px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />

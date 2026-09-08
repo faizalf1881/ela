@@ -14,13 +14,17 @@ export async function GET(req: Request) {
   if (searchParams.get("all") === "1") {
     const s = await getSession();
     if (s?.role !== "admin") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    const plans = await prisma.subscriptionPlan.findMany({ orderBy: [{ sortOrder: "asc" }, { price: "asc" }] });
+    const plans = await prisma.subscriptionPlan.findMany({
+      orderBy: [{ sortOrder: "asc" }, { price: "asc" }],
+      include: { mealItems: { include: { menuItem: { select: { id: true, name: true, price: true } } } }, _count: { select: { subscriptions: true } } },
+    });
     return NextResponse.json({ plans });
   }
 
   const plans = await prisma.subscriptionPlan.findMany({
     where: { active: true },
     orderBy: [{ sortOrder: "asc" }, { price: "asc" }],
+    include: { mealItems: { include: { menuItem: { select: { id: true, name: true, price: true } } } } },
   });
   return NextResponse.json({ plans });
 }
@@ -36,6 +40,11 @@ const createSchema = z.object({
   benefits: z.array(z.string().max(160)).max(12).optional().default([]),
   active: z.boolean().optional().default(true),
   sortOrder: z.number().int().optional().default(0),
+  // Meal-plan configuration
+  kind: z.enum(["DISCOUNT", "MEAL"]).optional().default("DISCOUNT"),
+  serviceDays: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+  durationDays: z.number().int().min(1).max(400).nullable().optional(),
+  mealItems: z.array(z.object({ menuItemId: z.string().min(1), qty: z.number().int().min(1).max(20).default(1) })).max(10).optional(),
 });
 
 // POST /api/plans — admin creates a plan (also mirrored into Razorpay for AutoPay).
@@ -66,7 +75,19 @@ export async function POST(req: Request) {
     console.error("[Razorpay] plan create failed:", msg);
   }
 
-  const plan = await prisma.subscriptionPlan.create({ data: { ...d, razorpayPlanId } });
+  const { mealItems, ...planFields } = d;
+  if (planFields.kind === "MEAL" && (!mealItems || mealItems.length === 0)) {
+    return NextResponse.json({ error: "A meal plan needs at least one dish." }, { status: 400 });
+  }
+
+  const plan = await prisma.subscriptionPlan.create({
+    data: {
+      ...planFields,
+      razorpayPlanId,
+      ...(mealItems?.length ? { mealItems: { create: mealItems.map((m) => ({ menuItemId: m.menuItemId, qty: m.qty })) } } : {}),
+    },
+    include: { mealItems: { include: { menuItem: { select: { id: true, name: true, price: true } } } } },
+  });
   await audit({
     actor: actorFrom(s),
     action: "plan.created",

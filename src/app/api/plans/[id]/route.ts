@@ -19,6 +19,10 @@ const updateSchema = z.object({
   benefits: z.array(z.string().max(160)).max(12).optional(),
   active: z.boolean().optional(),
   sortOrder: z.number().int().optional(),
+  kind: z.enum(["DISCOUNT", "MEAL"]).optional(),
+  serviceDays: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+  durationDays: z.number().int().min(1).max(400).nullable().optional(),
+  mealItems: z.array(z.object({ menuItemId: z.string().min(1), qty: z.number().int().min(1).max(20).default(1) })).max(10).optional(),
 });
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -32,7 +36,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const before = await prisma.subscriptionPlan.findUnique({ where: { id } });
   if (!before) return NextResponse.json({ error: "Plan not found" }, { status: 404 });
 
-  const after = { ...before, ...parsed.data };
+  const { mealItems, ...patchFields } = parsed.data;
+  const after = { ...before, ...patchFields };
   let razorpayPlanId = before.razorpayPlanId;
   let warning: string | null = null;
 
@@ -60,14 +65,26 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     }
   }
 
-  const plan = await prisma.subscriptionPlan.update({ where: { id }, data: { ...parsed.data, razorpayPlanId } });
+  // Replace the dish list wholesale when provided.
+  if (mealItems) {
+    await prisma.planMealItem.deleteMany({ where: { planId: id } });
+    if (mealItems.length) {
+      await prisma.planMealItem.createMany({ data: mealItems.map((m) => ({ planId: id, menuItemId: m.menuItemId, qty: m.qty })) });
+    }
+  }
+
+  const plan = await prisma.subscriptionPlan.update({
+    where: { id },
+    data: { ...patchFields, razorpayPlanId },
+    include: { mealItems: { include: { menuItem: { select: { id: true, name: true, price: true } } } } },
+  });
   await audit({
     actor: actorFrom(s),
     action: "plan.updated",
     entityType: "subscriptionPlan",
     entityId: id,
     summary: `Updated membership plan "${plan.name}"`,
-    metadata: { changes: parsed.data, razorpayPlanId },
+    metadata: { changes: patchFields, mealItems: mealItems?.length ?? null, razorpayPlanId },
     req,
   });
   return NextResponse.json({ plan, warning });

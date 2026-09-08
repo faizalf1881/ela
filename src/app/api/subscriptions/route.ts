@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import { razorpay } from "@/lib/razorpay";
 import { audit, actorFrom } from "@/lib/audit";
+import { addDays, istDateKey, toDbDate } from "@/lib/delivery";
 import type { Prisma } from "@prisma/client";
 
 export const runtime = "nodejs";
@@ -25,8 +26,11 @@ export async function GET(req: Request) {
   const subscriptions = await prisma.subscription.findMany({
     where,
     include: {
-      plan: true,
+      plan: { include: { mealItems: { include: { menuItem: { select: { id: true, name: true } } } } } },
       charges: { orderBy: { paidAt: "desc" } },
+      deliveryLocation: { select: { id: true, name: true } },
+      deliverySlot: { select: { id: true, label: true } },
+      _count: { select: { orders: true } },
       ...(s.role === "customer" ? {} : { customer: { select: { id: true, name: true, phone: true } } }),
     },
     orderBy: { createdAt: "desc" },
@@ -36,7 +40,13 @@ export async function GET(req: Request) {
   return NextResponse.json({ subscriptions });
 }
 
-const createSchema = z.object({ planId: z.string().trim().min(1) });
+const createSchema = z.object({
+  planId: z.string().trim().min(1),
+  // Meal plans need standing delivery preferences for the auto-generated orders.
+  deliveryLocationId: z.string().trim().min(1).optional(),
+  deliverySlotId: z.string().trim().min(1).optional(),
+  startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
 
 // POST /api/subscriptions — customer starts a membership (Razorpay eMandate/AutoPay).
 export async function POST(req: Request) {
@@ -48,6 +58,9 @@ export async function POST(req: Request) {
 
   const plan = await prisma.subscriptionPlan.findFirst({ where: { id: parsed.data.planId, active: true } });
   if (!plan) return NextResponse.json({ error: "That plan is not available." }, { status: 404 });
+  if (plan.kind === "MEAL" && !parsed.data.deliveryLocationId) {
+    return NextResponse.json({ error: "Please choose where your meals should be delivered." }, { status: 400 });
+  }
   if (!plan.razorpayPlanId) {
     return NextResponse.json(
       { error: "This plan isn't ready for online billing yet. Please contact us." },
@@ -71,12 +84,21 @@ export async function POST(req: Request) {
       notes: { customerId: customer.id, phone: customer.phone, planId: plan.id },
     });
 
+    // Service window: starts today (or the chosen date) and runs for the plan's
+    // configured duration, if any.
+    const startKey = parsed.data.startDate || istDateKey();
+    const endKey = plan.durationDays ? addDays(startKey, plan.durationDays - 1) : null;
+
     const subscription = await prisma.subscription.create({
       data: {
         customerId: customer.id,
         planId: plan.id,
         status: "CREATED",
         razorpaySubscriptionId: rp.id,
+        deliveryLocationId: parsed.data.deliveryLocationId ?? null,
+        deliverySlotId: parsed.data.deliverySlotId ?? null,
+        startDate: plan.kind === "MEAL" ? toDbDate(startKey) : null,
+        endDate: plan.kind === "MEAL" && endKey ? toDbDate(endKey) : null,
       },
     });
 

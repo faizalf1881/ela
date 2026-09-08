@@ -36,8 +36,12 @@ Cormorant Garamond).
 - Full menu CRUD with **per-item discount %** and **stock limits**
 - **Delivery locations** — add/edit/remove areas, per-area fee, activate/deactivate
 - **Coupons** — percent or fixed, min order, max discount, usage limits, validity dates
-- **Memberships** — create subscription plans (price, billing cycle, order discount,
-  free delivery, benefit list), see subscribers, recurring revenue and payment history
+- **Memberships** — two plan types: *discount memberships* (perks on normal orders)
+  and **meal plans** that automatically generate a daily order for the subscriber
+  (dish list, service weekdays, duration). See subscribers, recurring revenue and
+  payment history, and trigger today's generation manually
+- **Delivery schedule** — order cut-off time, service weekdays, booking window, and
+  the delivery time slots customers choose from (individually closable per date)
 - **CRM** — customer directory with order history, lifetime spend, preferred payment,
   last activity and internal notes
 - **Reviews** — publish/unpublish/edit/delete testimonials + a shareable
@@ -66,7 +70,7 @@ Cormorant Garamond).
 - **Edge middleware** guarding `/admin`, `/kitchen`, `/orders`
 - JWT httpOnly session cookies (jose), bcrypt staff passwords, Zod validation
 - Security headers, SEO (`robots`, `sitemap`, `manifest`), `next/image` optimization
-- **141-check automated end-to-end test** covering every module above
+- **193-check automated end-to-end test** covering every module above
 - Uploads stored in Postgres (2 MB/file cap) — no external object store to configure
 
 ## Roles
@@ -169,6 +173,23 @@ Already git-committed and configured — `vercel.json` sets the build command
 
 ---
 
+## Meal plans (automatic daily orders)
+
+A plan can be a **discount membership** or a **meal plan**. A meal plan carries a
+dish list, the weekdays it is served, and an optional duration. Each morning a
+Vercel Cron job calls `/api/cron/meal-plans` and creates that day's order for every
+active subscriber — prepaid (zero balance), tagged **Subscription** on the Orders
+board, and invoiced so the kitchen and stock counts behave normally.
+
+- Generation is **idempotent**: a unique `(subscription, delivery date)` index means
+  re-running never double-orders.
+- It respects start/end dates, cancellation, pause, and the plan's service days.
+- Set **`CRON_SECRET`** in Vercel so only Vercel Cron (or a signed-in admin) can
+  trigger it. The schedule lives in `vercel.json` (01:30 UTC = 07:00 IST, before the
+  order cut-off).
+
+---
+
 ## Turning on memberships
 
 1. **Razorpay → Subscriptions** must be enabled on the account (it is used to hold the
@@ -249,6 +270,10 @@ The dev fallback prints OTPs to the server console. To deliver them for real:
 | POST   | `/api/subscriptions/verify` | customer | **Verify mandate signature**, activate |
 | POST   | `/api/subscriptions/[id]/cancel` | owner/admin | Cancel at cycle end          |
 | POST   | `/api/webhooks/razorpay`    | Razorpay | **Signed** recurring-billing events  |
+| GET    | `/api/delivery/availability`| public   | Bookable delivery dates + time slots |
+| GET/POST | `/api/slots`              | admin    | List / create delivery time slots    |
+| PATCH/DELETE | `/api/slots/[id]`     | admin    | Edit, close a date, or remove a slot |
+| POST   | `/api/cron/meal-plans`      | cron/admin | Generate today's meal-plan orders  |
 | POST   | `/api/uploads`              | admin/customer | Upload dish photos / complaint files |
 | GET    | `/api/media/[id]`           | mixed    | Serve a file (menu public, tickets private) |
 | GET    | `/api/admin/export`         | admin    | `?type=…&format=xlsx\|csv` report export |

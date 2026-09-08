@@ -72,6 +72,35 @@ async function activateMembershipForTest(customerId: string, planId: string): Pr
   }
 }
 
+/** Attach an ACTIVE meal-plan subscription so the generator has something to do. */
+async function activateMealPlanForTest(customerId: string, planId: string, locationId: string, slotId: string | undefined, startKey: string, endKey: string | null): Promise<string | null> {
+  const prisma = new PrismaClient();
+  try {
+    const renews = new Date();
+    renews.setMonth(renews.getMonth() + 1);
+    const sub = await prisma.subscription.create({
+      data: {
+        customerId,
+        planId,
+        status: "ACTIVE",
+        razorpaySubscriptionId: "sub_meal_" + crypto.randomBytes(6).toString("hex"),
+        startedAt: new Date(),
+        currentEnd: renews,
+        deliveryLocationId: locationId,
+        deliverySlotId: slotId ?? null,
+        startDate: new Date(`${startKey}T00:00:00.000Z`),
+        endDate: endKey ? new Date(`${endKey}T00:00:00.000Z`) : null,
+      },
+    });
+    return sub.id;
+  } catch (e) {
+    console.log("    ! could not attach meal plan:", (e as Error).message.split("\n")[0]);
+    return null;
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 function section(t: string) {
   console.log(`\n▸ ${t}`);
 }
@@ -719,6 +748,80 @@ async function main() {
     accWithSubs.invoices.some((i: { paymentType: string }) => i.paymentType === "Subscription"),
     "membership charges appear in Accounts as Subscription",
   );
+
+  // ---------- Automated meal-plan ordering (#29-#32) ----------
+  section("Meal plans: automated daily orders");
+  const today = new Date().toISOString().slice(0, 10);
+  const allDays = [0, 1, 2, 3, 4, 5, 6];
+
+  const mealPlanRes = await admin.fetch("/api/plans", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "E2E Veg Meal Plan",
+      description: "Daily veg meal",
+      price: 2400,
+      interval: "MONTHLY",
+      kind: "MEAL",
+      serviceDays: allDays, // every day, so the test is not weekday-dependent
+      durationDays: 30,
+      mealItems: [{ menuItemId: menu[1].id, qty: 1 }],
+      active: true,
+    }),
+  });
+  const mealPlan = (await mealPlanRes.json()).plan;
+  ok(mealPlanRes.status === 201, "admin creates an auto-ordering meal plan → 201");
+  ok(mealPlan?.kind === "MEAL" && mealPlan?.mealItems?.length === 1, "plan stores its dish list");
+
+  const noDishes = await admin.fetch("/api/plans", {
+    method: "POST",
+    body: JSON.stringify({ name: "E2E Empty", price: 100, interval: "MONTHLY", kind: "MEAL", mealItems: [] }),
+  });
+  ok(noDishes.status === 400, "meal plan without dishes rejected → 400");
+
+  const mealSubId = await activateMealPlanForTest(crmMe.id, mealPlan.id, locationId, sched.deliverySlotId, today, null);
+  ok(!!mealSubId, "meal-plan subscription activated for the test customer");
+
+  const gen1 = await admin.fetch(`/api/cron/meal-plans?date=${today}`, { method: "POST" });
+  const g1 = await gen1.json();
+  ok(gen1.status === 200, "generator runs → 200");
+  ok(g1.created.length >= 1, `generated ${g1.created.length} meal order(s)`);
+
+  const gen2 = await admin.fetch(`/api/cron/meal-plans?date=${today}`, { method: "POST" });
+  const g2 = await gen2.json();
+  ok(g2.created.length === 0, "second run creates nothing (no duplicate for the same day)");
+  ok(g2.skipped.some((x: { reason: string }) => x.reason === "already generated"), "duplicate is explicitly skipped");
+
+  const allOrders = await (await admin.fetch("/api/orders")).json();
+  const autoOrder = allOrders.orders.find((o: { subscriptionId?: string | null }) => o.subscriptionId === mealSubId);
+  ok(!!autoOrder, "generated order is visible on the Orders board");
+  ok(autoOrder?.source === "subscription", "order is tagged as a subscription order");
+  ok(autoOrder?.status === "PLACED" && !!autoOrder?.invoiceNo, "auto order is placed and invoiced for the kitchen");
+  ok(autoOrder?.total === 0 && autoOrder?.paymentStatus === "PAID", "auto order is prepaid (zero balance)");
+  ok(String(autoOrder?.deliveryDate ?? "").startsWith(today), "auto order carries the service date");
+
+  // Lifecycle: a cancelled subscription stops generating.
+  const cancelSub = await admin.fetch(`/api/subscriptions/${mealSubId}/cancel`, { method: "POST" });
+  ok(cancelSub.status === 200, "admin cancels the meal subscription");
+  const tomorrow = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+  const gen3 = await admin.fetch(`/api/cron/meal-plans?date=${tomorrow}`, { method: "POST" });
+  const g3 = await gen3.json();
+  ok(g3.created.length === 0, "cancelled subscription generates no further orders");
+
+  // Non-service days are respected.
+  const mealSubId2 = await activateMealPlanForTest(crmMe.id, mealPlan.id, locationId, sched.deliverySlotId, today, null);
+  ok(!!mealSubId2, "second meal subscription activated");
+  const onlyOneDay = await admin.fetch(`/api/plans/${mealPlan.id}`, { method: "PATCH", body: JSON.stringify({ serviceDays: [] }) });
+  ok(onlyOneDay.status === 200, "admin clears the plan's service days");
+  const dayAfter = new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10);
+  const gen4 = await admin.fetch(`/api/cron/meal-plans?date=${dayAfter}`, { method: "POST" });
+  const g4 = await gen4.json();
+  ok(g4.created.length === 0, "no orders on a non-service day");
+  ok(g4.skipped.some((x: { reason: string }) => x.reason === "not a service day"), "non-service day is the recorded reason");
+
+  const anonCron = await new Client().fetch("/api/cron/meal-plans", { method: "POST" });
+  ok(anonCron.status === 401, "generator is not publicly triggerable → 401");
+  const custCron = await customer.fetch("/api/cron/meal-plans", { method: "POST" });
+  ok(custCron.status === 401, "customers cannot trigger the generator → 401");
 
   // ---------- Audit trail ----------
   section("Audit trail");
