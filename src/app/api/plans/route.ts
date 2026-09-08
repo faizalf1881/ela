@@ -56,6 +56,12 @@ export async function POST(req: Request) {
   if (!parsed.success) return NextResponse.json({ error: "Invalid data", details: parsed.error.flatten() }, { status: 400 });
   const d = parsed.data;
 
+  // Validate before touching Razorpay, so a rejected plan never leaves an
+  // orphaned plan behind in the payment gateway.
+  if (d.kind === "MEAL" && (!d.mealItems || d.mealItems.length === 0)) {
+    return NextResponse.json({ error: "A meal plan needs at least one dish." }, { status: 400 });
+  }
+
   // Mirror into Razorpay so subscriptions (eMandate/AutoPay) can bill against it.
   // If the account doesn't have Subscriptions enabled we still save the plan
   // locally and tell the admin — the plan just can't be subscribed to yet.
@@ -76,10 +82,6 @@ export async function POST(req: Request) {
   }
 
   const { mealItems, ...planFields } = d;
-  if (planFields.kind === "MEAL" && (!mealItems || mealItems.length === 0)) {
-    return NextResponse.json({ error: "A meal plan needs at least one dish." }, { status: 400 });
-  }
-
   const plan = await prisma.subscriptionPlan.create({
     data: {
       ...planFields,

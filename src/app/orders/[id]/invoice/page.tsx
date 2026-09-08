@@ -112,14 +112,18 @@ export default async function InvoicePage({ params }: { params: Promise<{ id: st
               <span>Total</span>
               <span>{inr(order.total)}</span>
             </div>
-            {order.codBalanceDue > 0 && (
-              <>
-                <Row label="Paid online (confirmation)" value={inr(order.codConfirmPaid)} green />
-                <div className="flex items-center justify-between font-medium">
-                  <span>Balance due on delivery</span>
-                  <span>{inr(order.codBalanceDue)}</span>
-                </div>
-              </>
+            {order.source === "subscription" && (
+              <Row label="Prepaid by meal plan" value={`- ${inr(order.subtotal)}`} green />
+            )}
+            {/* Only a real up-front payment is worth showing; plain COD has none. */}
+            {order.codConfirmPaid > 0 && (
+              <Row label="Paid online (confirmation)" value={inr(order.codConfirmPaid)} green />
+            )}
+            {order.paymentMethod === "cod" && order.codBalanceDue > 0 && (
+              <div className="flex items-center justify-between font-medium">
+                <span>{order.codConfirmPaid > 0 ? "Balance due on delivery" : "To pay on delivery"}</span>
+                <span>{inr(order.codBalanceDue)}</span>
+              </div>
             )}
           </div>
 

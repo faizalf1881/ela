@@ -97,8 +97,10 @@ export async function generateMealPlanOrders(dateKey?: string): Promise<Generati
           subscriptionId: sub.id,
           source: "subscription",
           subtotal: value,
-          // Prepaid through the plan, so nothing is collected on delivery.
-          discountTotal: value,
+          // Prepaid through the plan: nothing is collected on delivery. This is
+          // NOT a discount — the money was taken on the subscription charge — so
+          // discountTotal stays 0 to keep the discount reports honest.
+          discountTotal: 0,
           deliveryFee: 0,
           total: 0,
           paymentMethod: "subscription",

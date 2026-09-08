@@ -797,6 +797,14 @@ async function main() {
   ok(autoOrder?.source === "subscription", "order is tagged as a subscription order");
   ok(autoOrder?.status === "PLACED" && !!autoOrder?.invoiceNo, "auto order is placed and invoiced for the kitchen");
   ok(autoOrder?.total === 0 && autoOrder?.paymentStatus === "PAID", "auto order is prepaid (zero balance)");
+  ok(autoOrder?.discountTotal === 0, "prepaid meal is not recorded as a discount (keeps discount reports honest)");
+
+  // Prepaid zero-value orders must not distort the sales figures.
+  const anaWith = await (await admin.fetch("/api/admin/analytics?range=daily")).json();
+  ok(
+    !anaWith.series.some((b: { orders: number; revenue: number }) => b.orders > 0 && b.revenue === 0) || anaWith.summary.avgOrder > 0,
+    "analytics average order value is not dragged to zero by prepaid meals",
+  );
   ok(String(autoOrder?.deliveryDate ?? "").startsWith(today), "auto order carries the service date");
 
   // Lifecycle: a cancelled subscription stops generating.

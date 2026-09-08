@@ -60,7 +60,10 @@ export async function GET(req: Request) {
 
   // Revenue-generating orders = anything not pending/cancelled.
   const orders = await prisma.order.findMany({
-    where: { createdAt: { gte: windowStart }, status: { notIn: ["PENDING", "CANCELLED"] } },
+    // Meal-plan orders are prepaid and carry a zero total — their revenue is
+    // recognised on the subscription charge (see Accounts), so counting them here
+    // would distort revenue, order count and average order value.
+    where: { createdAt: { gte: windowStart }, status: { notIn: ["PENDING", "CANCELLED"] }, source: { not: "subscription" } },
     include: { items: true },
     orderBy: { createdAt: "asc" },
   });
