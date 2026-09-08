@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText, MapPin, TicketPercent, Wallet, Contact, Star, LifeBuoy, Crown } from "lucide-react";
@@ -22,10 +22,59 @@ const ADMIN_NAV = [
 ];
 const KITCHEN_NAV = [{ href: "/kitchen", label: "Kitchen Board", icon: ChefHat }];
 
+/**
+ * Keeps the horizontal nav where the admin left it. Next.js remounts this shell on
+ * every route change, which would otherwise snap the bar back to the far left —
+ * annoying when working between the right-hand modules. Position is stored per
+ * session, and on first load we scroll the active tab into view instead.
+ */
+function useStickyNavScroll(key: string, active: boolean) {
+  const ref = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !active) return;
+
+    let saved: number | null = null;
+    try {
+      const raw = sessionStorage.getItem(key);
+      saved = raw === null ? null : Number(raw);
+    } catch {}
+
+    if (saved !== null && !Number.isNaN(saved)) {
+      el.scrollLeft = saved;
+    } else {
+      // First visit: bring the current section into view rather than starting left.
+      el.querySelector('[data-active="true"]')?.scrollIntoView({ block: "nearest", inline: "center" });
+    }
+
+    let frame = 0;
+    const onScroll = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        try {
+          sessionStorage.setItem(key, String(el.scrollLeft));
+        } catch {}
+      });
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      cancelAnimationFrame(frame);
+      el.removeEventListener("scroll", onScroll);
+    };
+  }, [key, active]);
+
+  return ref;
+}
+
 export function StaffShell({ allow, children }: { allow: Role[]; children: ReactNode }) {
   const { user, loading, logout } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
+  // Hooks must run unconditionally — these sit above the auth early-return.
+  const ready = !loading && !!user && allow.includes(user.role);
+  const desktopNavRef = useStickyNavScroll("ela-nav-scroll-desktop", ready);
+  const mobileNavRef = useStickyNavScroll("ela-nav-scroll-mobile", ready);
 
   useEffect(() => {
     if (loading) return;
@@ -60,13 +109,14 @@ export function StaffShell({ allow, children }: { allow: Role[]; children: React
               </div>
             </div>
 
-            <nav className="hidden sm:flex items-center gap-1 min-w-0 flex-1 overflow-x-auto">
+            <nav ref={desktopNavRef} className="hidden sm:flex items-center gap-1 min-w-0 flex-1 overflow-x-auto">
               {nav.map(({ href, label, icon: Icon }) => {
                 const active = pathname === href;
                 return (
                   <Link
                     key={href}
                     href={href}
+                    data-active={active}
                     className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-sm whitespace-nowrap transition-colors ${
                       active ? "bg-primary text-primary-foreground" : "text-foreground/80 hover:bg-muted"
                     }`}
@@ -89,13 +139,14 @@ export function StaffShell({ allow, children }: { allow: Role[]; children: React
           </div>
 
           {/* mobile nav */}
-          <nav className="sm:hidden flex items-center gap-1 pb-3 overflow-x-auto">
+          <nav ref={mobileNavRef} className="sm:hidden flex items-center gap-1 pb-3 overflow-x-auto">
             {nav.map(({ href, label, icon: Icon }) => {
               const active = pathname === href;
               return (
                 <Link
                   key={href}
                   href={href}
+                  data-active={active}
                   className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs whitespace-nowrap ${
                     active ? "bg-primary text-primary-foreground" : "text-foreground/80 bg-muted"
                   }`}

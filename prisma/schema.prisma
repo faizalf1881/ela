@@ -84,6 +84,7 @@ enum OrderStatus {
 
 enum PaymentStatus {
   UNPAID
+  PARTIAL // COD confirmation amount collected online; balance due in cash
   PAID
   FAILED
 }
@@ -110,6 +111,10 @@ model Order {
   membershipDiscount Int     @default(0) // saved via active subscription
   deliveryFee        Int     @default(0)
   total              Int
+
+  /// COD confirmation: amount taken online up front, and the cash still due.
+  codConfirmPaid Int @default(0)
+  codBalanceDue  Int @default(0)
 
   invoiceNo String? @unique
   source    String  @default("web") // web | manual (admin-created invoice)
@@ -146,10 +151,16 @@ model OrderItem {
 
 /// Singleton store configuration (admin can stop taking orders).
 model StoreSetting {
-  id              Int      @id @default(1)
-  acceptingOrders Boolean  @default(true)
+  id              Int     @id @default(1)
+  acceptingOrders Boolean @default(true)
   closedMessage   String?
-  updatedAt       DateTime @updatedAt
+
+  /// Cash on Delivery availability + the up-front confirmation amount (whole
+  /// rupees) collected online to reduce refused/RTO deliveries. 0 = none.
+  codEnabled       Boolean @default(true)
+  codConfirmAmount Int     @default(0)
+
+  updatedAt DateTime @updatedAt
 }
 
 /// Atomic counters (e.g. sequential invoice numbers).

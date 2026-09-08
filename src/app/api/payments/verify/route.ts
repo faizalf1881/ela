@@ -53,18 +53,34 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Order not found" }, { status: 404 });
   }
 
+  // A COD order only collects its confirmation amount online — the balance is
+  // still due in cash, so it is PARTIAL rather than PAID.
+  const isCodConfirmation = order.paymentMethod === "cod" && order.codBalanceDue > 0;
+  const collected = isCodConfirmation ? order.total - order.codBalanceDue : order.total;
+
   await prisma.order.update({
     where: { id: order.id },
     data: {
-      paymentStatus: "PAID",
+      paymentStatus: isCodConfirmation ? "PARTIAL" : "PAID",
       status: "PLACED",
       razorpayPaymentId: razorpay_payment_id,
+      codConfirmPaid: isCodConfirmation ? collected : 0,
     },
   });
 
   // Assign invoice number + decrement stock (idempotent).
   const updated = await finalizeOrder(order.id);
-  await audit({ actor: actorFrom(s), action: "order.paid", entityType: "order", entityId: order.id, summary: `Payment verified — ₹${updated.total} (${updated.invoiceNo})`, metadata: { razorpay_order_id, razorpay_payment_id, total: updated.total }, req });
+  await audit({
+    actor: actorFrom(s),
+    action: "order.paid",
+    entityType: "order",
+    entityId: order.id,
+    summary: isCodConfirmation
+      ? `COD confirmation of ₹${collected} verified — ₹${updated.codBalanceDue} due on delivery (${updated.invoiceNo})`
+      : `Payment verified — ₹${updated.total} (${updated.invoiceNo})`,
+    metadata: { razorpay_order_id, razorpay_payment_id, total: updated.total, collected, balanceDue: updated.codBalanceDue },
+    req,
+  });
   await notifyOrderStatus(updated);
   await notifyNewOrderToAdmin(updated);
 

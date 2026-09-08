@@ -62,14 +62,26 @@ export default function CheckoutPage() {
   const [couponInput, setCouponInput] = useState("");
   const [applied, setApplied] = useState<Applied | null>(null);
   const [couponBusy, setCouponBusy] = useState(false);
-  const [placed, setPlaced] = useState<null | { id: string; total: number; method: string }>(null);
+  const [placed, setPlaced] = useState<null | { id: string; total: number; method: string; balanceDue?: number }>(null);
   const [busy, setBusy] = useState(false);
-  const [store, setStore] = useState<{ accepting: boolean; message: string | null }>({ accepting: true, message: null });
+  const [store, setStore] = useState<{ accepting: boolean; message: string | null; codEnabled: boolean; codConfirmAmount: number }>({
+    accepting: true,
+    message: null,
+    codEnabled: true,
+    codConfirmAmount: 0,
+  });
 
   useEffect(() => {
     fetch("/api/settings", { cache: "no-store" })
       .then((r) => r.json())
-      .then((d) => setStore({ accepting: d.acceptingOrders, message: d.closedMessage }))
+      .then((d) =>
+        setStore({
+          accepting: d.acceptingOrders,
+          message: d.closedMessage,
+          codEnabled: d.codEnabled ?? true,
+          codConfirmAmount: d.codConfirmAmount ?? 0,
+        }),
+      )
       .catch(() => {});
     fetch("/api/locations", { cache: "no-store" })
       .then((r) => r.json())
@@ -92,6 +104,11 @@ export default function CheckoutPage() {
   useEffect(() => {
     setApplied(null);
   }, [subtotal]);
+
+  // COD may be turned off by admin at any moment — never leave it selected.
+  useEffect(() => {
+    if (!store.codEnabled && form.method === "cod") setForm((f) => ({ ...f, method: "razorpay" }));
+  }, [store.codEnabled, form.method]);
 
   const selectedLocation = locations.find((l) => l.id === form.locationId) || null;
   // Membership benefits mirror the server calculation in /api/orders.
@@ -171,6 +188,8 @@ export default function CheckoutPage() {
         toast.success("Order placed! Pay cash on delivery.");
         return;
       }
+      // "cod_confirm" falls through to Razorpay for the confirmation amount only.
+      const codConfirm = data.paymentMethod === "cod_confirm";
 
       const ok = await loadRazorpay();
       if (!ok || !window.Razorpay) throw new Error("Could not load payment gateway");
@@ -180,7 +199,7 @@ export default function CheckoutPage() {
         amount: data.razorpay.amount,
         currency: data.razorpay.currency,
         name: "Ela & Co.",
-        description: `Order ${data.order.id}`,
+        description: codConfirm ? `Order ${data.order.id} — COD confirmation` : `Order ${data.order.id}`,
         image: "/ela-logo.jpeg",
         order_id: data.razorpay.orderId,
         prefill: { name: form.name, contact: form.phone },
@@ -195,9 +214,13 @@ export default function CheckoutPage() {
             });
             const vd = await vr.json();
             if (!vr.ok) throw new Error(vd.error || "Verification failed");
-            setPlaced({ id: vd.order.id, total: vd.order.total, method: "razorpay" });
+            setPlaced({ id: vd.order.id, total: vd.order.total, method: codConfirm ? "cod" : "razorpay", balanceDue: vd.order.codBalanceDue ?? 0 });
             clear();
-            toast.success("Payment successful! Order confirmed.");
+            toast.success(
+              codConfirm
+                ? `Order confirmed! ${inr(vd.order.codBalanceDue ?? 0)} due in cash on delivery.`
+                : "Payment successful! Order confirmed.",
+            );
           } catch (err) {
             toast.error(err instanceof Error ? err.message : "Payment verification failed");
           } finally {
@@ -240,8 +263,12 @@ export default function CheckoutPage() {
             <p className="mt-3 text-muted-foreground">
               Your order <strong className="text-foreground">#{placed.id.slice(-6).toUpperCase()}</strong> for{" "}
               <strong className="text-foreground">{inr(placed.total)}</strong>{" "}
-              {placed.method === "cod" ? "is confirmed — pay cash on delivery." : "is confirmed and paid."} Our kitchen will
-              start preparing it shortly.
+              {placed.method === "cod"
+                ? placed.balanceDue
+                  ? `is confirmed — ${inr(placed.balanceDue)} to pay in cash on delivery.`
+                  : "is confirmed — pay cash on delivery."
+                : "is confirmed and paid."}{" "}
+              Our kitchen will start preparing it shortly.
             </p>
             <div className="mt-8 flex flex-wrap gap-3 justify-center">
               <Link href="/orders" className="inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90">
@@ -385,10 +412,25 @@ export default function CheckoutPage() {
 
                 <div className="mt-5">
                   <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground mb-2">Payment</div>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className={`grid gap-2 ${store.codEnabled ? "grid-cols-2" : "grid-cols-1"}`}>
                     <PayOption active={form.method === "razorpay"} onClick={() => setForm({ ...form, method: "razorpay" })} icon={CreditCard} title="Pay online" sub="UPI · Cards · Wallets" />
-                    <PayOption active={form.method === "cod"} onClick={() => setForm({ ...form, method: "cod" })} icon={Wallet} title="Cash on Delivery" sub="Pay at your doorstep" />
+                    {store.codEnabled && (
+                      <PayOption
+                        active={form.method === "cod"}
+                        onClick={() => setForm({ ...form, method: "cod" })}
+                        icon={Wallet}
+                        title="Cash on Delivery"
+                        sub={store.codConfirmAmount > 0 ? `${inr(store.codConfirmAmount)} now, rest on delivery` : "Pay at your doorstep"}
+                      />
+                    )}
                   </div>
+                  {store.codEnabled && form.method === "cod" && store.codConfirmAmount > 0 && (
+                    <div className="mt-2 rounded-xl border border-gold/40 bg-gold/10 px-3 py-2.5 text-xs text-foreground">
+                      To confirm a Cash on Delivery order we collect{" "}
+                      <strong>{inr(Math.min(store.codConfirmAmount, total))}</strong> now. The remaining{" "}
+                      <strong>{inr(Math.max(0, total - store.codConfirmAmount))}</strong> is paid in cash when your food arrives.
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -413,7 +455,13 @@ export default function CheckoutPage() {
                   className="mt-6 w-full inline-flex items-center justify-center gap-2 rounded-full bg-primary px-6 py-3.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed shadow-elegant"
                 >
                   {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : form.method === "cod" ? <Wallet className="h-4 w-4" /> : <CreditCard className="h-4 w-4" />}
-                  {!store.accepting ? "Ordering paused" : form.method === "cod" ? `Place order · ${inr(total)}` : `Pay ${inr(total)}`}
+                  {!store.accepting
+                    ? "Ordering paused"
+                    : form.method === "cod"
+                      ? store.codConfirmAmount > 0
+                        ? `Pay ${inr(Math.min(store.codConfirmAmount, total))} to confirm`
+                        : `Place order · ${inr(total)}`
+                      : `Pay ${inr(total)}`}
                 </button>
                 <p className="mt-3 text-xs text-muted-foreground text-center">
                   Payments are processed securely by Razorpay. Your card details never touch our servers.

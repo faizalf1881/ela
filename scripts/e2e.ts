@@ -514,6 +514,49 @@ async function main() {
   const tDel = await admin.fetch(`/api/plans/${tId}`, { method: "DELETE" });
   ok(tDel.status === 200 && (await tDel.json()).ok === true, "unused plan is hard-deleted");
 
+  // ---------- Cash on Delivery controls (#24 / #25) ----------
+  section("Cash on Delivery controls");
+  const codOff = await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ codEnabled: false }) });
+  ok(codOff.status === 200 && (await codOff.json()).codEnabled === false, "admin turns COD OFF");
+
+  const pubSettings = await (await new Client().fetch("/api/settings")).json();
+  ok(pubSettings.codEnabled === false, "checkout sees COD as unavailable");
+
+  const codBlocked = await customer.fetch("/api/orders", {
+    method: "POST",
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
+  });
+  ok(codBlocked.status === 403, "COD order rejected server-side while disabled → 403");
+
+  const codOn = await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ codEnabled: true, codConfirmAmount: 40 }) });
+  const codOnJson = await codOn.json();
+  ok(codOn.status === 200 && codOnJson.codEnabled === true && codOnJson.codConfirmAmount === 40, "admin re-enables COD with a Rs.40 confirmation amount");
+
+  const codPartial = await customer.fetch("/api/orders", {
+    method: "POST",
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
+  });
+  const cp = await codPartial.json();
+  ok(codPartial.status === 200, "COD order with confirmation amount accepted");
+  ok(cp.paymentMethod === "cod_confirm", "flow switches to online confirmation payment");
+  ok(cp.codConfirmAmount === 40, "charges exactly the configured Rs.40 now");
+  ok(cp.razorpay?.amount === 4000, "Razorpay is charged 4000 paise (Rs.40), not the full total");
+  ok(cp.codBalanceDue === cp.order.total - 40, "balance due in cash = total - confirmation");
+  ok(cp.order.status === "PENDING" && !cp.order.invoiceNo, "order waits for the confirmation payment before it is placed");
+
+  const zeroConfirm = await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ codConfirmAmount: 0 }) });
+  ok(zeroConfirm.status === 200, "admin clears the confirmation amount");
+  const plainCod = await customer.fetch("/api/orders", {
+    method: "POST",
+    body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, paymentMethod: "cod" }),
+  });
+  const pc = await plainCod.json();
+  ok(plainCod.status === 200 && pc.paymentMethod === "cod", "plain COD still works when no confirmation amount is set");
+  ok(!!pc.order.invoiceNo && pc.order.status === "PLACED", "plain COD is placed and invoiced immediately");
+
+  const custSettings = await customer.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ codEnabled: false }) });
+  ok(custSettings.status === 403, "customers cannot change COD settings → 403");
+
   // ---------- Uploads (menu photos + complaint attachments) ----------
   section("File uploads");
   // 1x1 transparent PNG

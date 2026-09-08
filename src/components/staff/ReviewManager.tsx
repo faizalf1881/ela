@@ -13,6 +13,7 @@ type Review = {
   published: boolean;
   source: string;
   sortOrder: number;
+  createdAt: string;
 };
 
 type Draft = {
@@ -137,16 +138,23 @@ export function ReviewManager() {
           items.map((r) => (
             <div key={r.id} className={`rounded-2xl border bg-card p-4 ${r.published ? "border-border" : "border-dashed border-gold/50"}`}>
               <div className="flex items-center justify-between">
-                <div className="flex gap-0.5">
-                  {Array.from({ length: Math.max(1, Math.min(5, r.rating)) }).map((_, i) => (
-                    <Star key={i} className="h-3.5 w-3.5 fill-gold text-gold" />
+                <div className="flex gap-0.5" title={`${r.rating} of 5`}>
+                  {Array.from({ length: 5 }).map((_, i) => (
+                    <Star key={i} className={`h-3.5 w-3.5 ${i < r.rating ? "fill-gold text-gold" : "text-muted-foreground/30"}`} />
                   ))}
                 </div>
                 {!r.published && <span className="rounded-full bg-gold/20 px-2 py-0.5 text-[10px] font-medium text-foreground uppercase tracking-wide">Pending</span>}
               </div>
               <blockquote className="mt-2 text-sm text-foreground italic">&ldquo;{r.body}&rdquo;</blockquote>
               <div className="mt-3 text-xs text-muted-foreground">
-                {r.authorName}{r.location ? ` · ${r.location}` : ""}{r.source === "collected" ? " · submitted" : ""}
+                {r.authorName}{r.location ? ` · ${r.location}` : ""}
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+                <span>{new Date(r.createdAt).toLocaleDateString("en-IN")}</span>
+                <span>·</span>
+                <span>{r.source === "collected" ? "Customer submitted" : "Added by admin"}</span>
+                <span>·</span>
+                <span className={r.published ? "text-forest" : "text-foreground"}>{r.published ? "Published" : "Awaiting approval"}</span>
               </div>
               <div className="mt-4 flex items-center gap-2">
                 <button onClick={() => togglePublish(r)} className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs hover:bg-muted">

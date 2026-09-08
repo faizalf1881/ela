@@ -68,6 +68,14 @@ export async function POST(req: Request) {
   }
   const { items, name, phone, deliveryLocationId, couponCode, paymentMethod } = parsed.data;
 
+  // COD availability is an admin setting — enforce it here, not just in the UI.
+  if (paymentMethod === "cod" && setting && !setting.codEnabled) {
+    return NextResponse.json(
+      { error: "Cash on Delivery isn't available right now. Please pay online." },
+      { status: 403 },
+    );
+  }
+
   // Delivery location must exist and be active — it sets the delivery fee & address.
   const location = await prisma.deliveryLocation.findFirst({ where: { id: deliveryLocationId, active: true } });
   if (!location) {
@@ -127,6 +135,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Order total too low." }, { status: 400 });
   }
 
+  // COD confirmation: collect part of the total online now, the rest in cash on
+  // delivery. Never charge more than the order is worth.
+  const codConfirmAmount =
+    paymentMethod === "cod" ? Math.min(Math.max(0, setting?.codConfirmAmount ?? 0), total) : 0;
+  const codBalanceDue = paymentMethod === "cod" ? total - codConfirmAmount : 0;
+  const collectsCodConfirmation = codConfirmAmount > 0;
+
   const created = await prisma.order.create({
     data: {
       customerId: s.sub,
@@ -142,7 +157,8 @@ export async function POST(req: Request) {
       deliveryFee,
       total,
       paymentMethod,
-      status: paymentMethod === "cod" ? "PLACED" : "PENDING",
+      codBalanceDue,
+      status: paymentMethod === "cod" && !collectsCodConfirmation ? "PLACED" : "PENDING",
       paymentStatus: "UNPAID",
       items: { create: lineItems },
     },
@@ -164,28 +180,31 @@ export async function POST(req: Request) {
     req,
   });
 
-  // Cash on delivery — finalize immediately (invoice + stock).
-  if (paymentMethod === "cod") {
+  // Cash on delivery with no confirmation fee — finalize immediately (invoice + stock).
+  if (paymentMethod === "cod" && !collectsCodConfirmation) {
     const order = await finalizeOrder(created.id);
     await notifyOrderStatus(order);
     await notifyNewOrderToAdmin(order);
     return NextResponse.json({ order, paymentMethod: "cod" });
   }
 
-  // Online payment — create a Razorpay order (amount in paise).
+  // Online payment — full total, or just the COD confirmation slice (amount in paise).
+  const chargeNow = collectsCodConfirmation ? codConfirmAmount : total;
   try {
     const rp = await razorpay().orders.create({
-      amount: total * 100,
+      amount: chargeNow * 100,
       currency: "INR",
       receipt: created.id,
-      notes: { orderId: created.id, customer: phone },
+      notes: { orderId: created.id, customer: phone, kind: collectsCodConfirmation ? "cod-confirmation" : "full" },
     });
 
     await prisma.order.update({ where: { id: created.id }, data: { razorpayOrderId: rp.id } });
 
     return NextResponse.json({
       order: created,
-      paymentMethod: "razorpay",
+      paymentMethod: collectsCodConfirmation ? "cod_confirm" : "razorpay",
+      codConfirmAmount,
+      codBalanceDue,
       razorpay: {
         orderId: rp.id,
         amount: rp.amount,
