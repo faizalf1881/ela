@@ -26,7 +26,9 @@ export async function GET(req: Request) {
 
   const { searchParams } = new URL(req.url);
   const date = searchParams.get("date") || istDateKey();
-  const result = await generateMealPlanOrders(date);
+  // Only a signed-in admin may override a closed store; the scheduled run never does.
+  const force = searchParams.get("force") === "1" && (await getSession())?.role === "admin";
+  const result = await generateMealPlanOrders(date, { force });
   return NextResponse.json(result);
 }
 

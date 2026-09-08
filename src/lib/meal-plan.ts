@@ -8,6 +8,8 @@ export type GenerationResult = {
   date: string;
   created: { subscriptionId: string; orderId: string; customer: string }[];
   skipped: { subscriptionId: string; reason: string }[];
+  /** True when generation was held back because the store is closed. */
+  storeClosed?: boolean;
 };
 
 /**
@@ -19,10 +21,33 @@ export type GenerationResult = {
  * dish value for the kitchen but a zero balance — the money is recognised on the
  * subscription charge, not again here.
  */
-export async function generateMealPlanOrders(dateKey?: string): Promise<GenerationResult> {
+export async function generateMealPlanOrders(
+  dateKey?: string,
+  opts: { force?: boolean } = {},
+): Promise<GenerationResult> {
   const date = dateKey || istDateKey();
   const weekday = weekdayOf(date);
   const result: GenerationResult = { date, created: [], skipped: [] };
+
+  // A closed store means the kitchen is not cooking that day (holiday, etc.), so
+  // the automatic run stands down. An admin can still force it from the panel —
+  // useful when the storefront is closed to new orders but subscribers are served.
+  const setting = await prisma.storeSetting.findUnique({ where: { id: 1 } });
+  if (setting && !setting.acceptingOrders && !opts.force) {
+    result.storeClosed = true;
+    const waiting = await prisma.subscription.count({ where: { status: "ACTIVE", plan: { kind: "MEAL" } } });
+    if (waiting > 0) {
+      result.skipped.push({ subscriptionId: "*", reason: `store is closed (${waiting} meal plan(s) held)` });
+    }
+    await audit({
+      actor: { type: "system", label: "meal-plan-scheduler" },
+      action: "subscription.orders_skipped",
+      entityType: "subscription",
+      summary: `Meal plans for ${date} held back — store is closed (${waiting} subscription(s))`,
+      metadata: { date, storeClosed: true, held: waiting },
+    });
+    return result;
+  }
 
   const subs = await prisma.subscription.findMany({
     where: { status: "ACTIVE", plan: { kind: "MEAL" } },

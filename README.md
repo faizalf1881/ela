@@ -184,6 +184,9 @@ board, and invoiced so the kitchen and stock counts behave normally.
 - Generation is **idempotent**: a unique `(subscription, delivery date)` index means
   re-running never double-orders.
 - It respects start/end dates, cancellation, pause, and the plan's service days.
+- **Closing the store pauses it.** On a holiday the scheduled run stands down and
+  logs why; an admin can still press *Generate today* → **Generate anyway** to serve
+  prepaid subscribers when the storefront is merely closed to new web orders.
 - Set **`CRON_SECRET`** in Vercel so only Vercel Cron (or a signed-in admin) can
   trigger it. The schedule lives in `vercel.json` (01:30 UTC = 07:00 IST, before the
   order cut-off).

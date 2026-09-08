@@ -826,6 +826,24 @@ async function main() {
   ok(g4.created.length === 0, "no orders on a non-service day");
   ok(g4.skipped.some((x: { reason: string }) => x.reason === "not a service day"), "non-service day is the recorded reason");
 
+  // A closed store pauses the automatic run, but an admin can still override.
+  const closeForMeals = await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ acceptingOrders: false }) });
+  ok(closeForMeals.status === 200, "store closed for the holiday test");
+  const mealSubId3 = await activateMealPlanForTest(crmMe.id, mealPlan.id, locationId, sched.deliverySlotId, today, null);
+  ok(!!mealSubId3, "third meal subscription activated");
+  await admin.fetch(`/api/plans/${mealPlan.id}`, { method: "PATCH", body: JSON.stringify({ serviceDays: allDays }) });
+
+  const closedRun = await admin.fetch(`/api/cron/meal-plans?date=${dayAfter}`, { method: "POST" });
+  const cr = await closedRun.json();
+  ok(cr.storeClosed === true, "closed store holds back the scheduled generation");
+  ok(cr.created.length === 0, "no meal orders created while the store is closed");
+
+  const forcedRun = await admin.fetch(`/api/cron/meal-plans?date=${dayAfter}&force=1`, { method: "POST" });
+  const fr = await forcedRun.json();
+  ok(!fr.storeClosed && fr.created.length >= 1, "admin can generate anyway for prepaid subscribers");
+
+  await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ acceptingOrders: true }) });
+
   const anonCron = await new Client().fetch("/api/cron/meal-plans", { method: "POST" });
   ok(anonCron.status === 401, "generator is not publicly triggerable → 401");
   const custCron = await customer.fetch("/api/cron/meal-plans", { method: "POST" });

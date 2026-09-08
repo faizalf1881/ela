@@ -152,12 +152,23 @@ export function PlanManager() {
     }
   }
 
-  async function runGenerator() {
+  async function runGenerator(force = false) {
     setRunning(true);
     try {
-      const res = await fetch("/api/cron/meal-plans", { method: "POST" });
+      const res = await fetch(`/api/cron/meal-plans${force ? "?force=1" : ""}`, { method: "POST" });
       const d = await res.json();
       if (!res.ok) throw new Error(d.error || "Could not run");
+
+      // The scheduled run stands down while the store is closed; offer to override.
+      if (d.storeClosed) {
+        toast.warning("Store is closed — meal orders were not generated", {
+          description: "Reopen the store, or generate them anyway for prepaid subscribers.",
+          action: { label: "Generate anyway", onClick: () => runGenerator(true) },
+          duration: 12000,
+        });
+        return;
+      }
+
       toast.success(`${d.created.length} meal order(s) created for ${d.date}`, {
         description: d.skipped.length ? `${d.skipped.length} subscription(s) skipped` : undefined,
       });
@@ -216,7 +227,7 @@ export function PlanManager() {
           </button>
           <ExportMenu type="subscriptions" label="Export all" />
           <button
-            onClick={runGenerator}
+            onClick={() => runGenerator()}
             disabled={running}
             title="Create today's meal-plan orders now (runs automatically each morning)"
             className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2.5 text-sm hover:bg-muted disabled:opacity-60"
