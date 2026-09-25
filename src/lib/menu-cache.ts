@@ -22,7 +22,7 @@ export const getPublicMenu = unstable_cache(
 /** Store open/closed setting, cached; busted when admin toggles it. */
 export const getStoreSetting = unstable_cache(
   async () => prisma.storeSetting.findUnique({ where: { id: 1 } }),
-  ["store-setting-v1"],
+  ["store-setting-v2"], // bump when StoreSetting gains columns: the data cache outlives deploys
   { tags: [CACHE_TAGS.settings], revalidate: 300 },
 );
 

@@ -6,13 +6,30 @@ import { audit, actorFrom } from "@/lib/audit";
 export const runtime = "nodejs";
 
 const MAX_BYTES = 2 * 1024 * 1024; // 2 MB per file
+const MAX_SOUND_BYTES = 3 * 1024 * 1024; // alert sounds: 3 MB (Vercel caps bodies at 4.5 MB)
 const IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 const DOC_TYPES = ["application/pdf"];
+// Browsers label the same formats differently (e.g. audio/mp3 vs audio/mpeg).
+const AUDIO_TYPES = [
+  "audio/mpeg",
+  "audio/mp3",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/wave",
+  "audio/mp4",
+  "audio/x-m4a",
+  "audio/m4a",
+  "audio/aac",
+  "audio/ogg",
+  "audio/webm",
+];
 
 /**
  * POST /api/uploads — multipart file upload.
  *   kind=menu   → admin only, images only (dish photos)
  *   kind=ticket → logged-in customer/staff, images or PDF (complaint evidence)
+ *   kind=sound  → admin only, one audio file (the new-order alert sound; stored
+ *                 exactly as uploaded)
  * Files are stored in Postgres and served back from /api/media/<id>, so no
  * external object store is required.
  */
@@ -28,29 +45,39 @@ export async function POST(req: Request) {
   }
 
   const kind = String(form.get("kind") || "ticket");
-  if (kind !== "menu" && kind !== "ticket") {
+  if (kind !== "menu" && kind !== "ticket" && kind !== "sound") {
     return NextResponse.json({ error: "Unknown upload type" }, { status: 400 });
   }
-  if (kind === "menu" && s.role !== "admin") {
+  if ((kind === "menu" || kind === "sound") && s.role !== "admin") {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   const files = form.getAll("file").filter((f): f is File => f instanceof File);
   if (files.length === 0) return NextResponse.json({ error: "No file provided" }, { status: 400 });
-  if (files.length > 3) return NextResponse.json({ error: "Up to 3 files at a time" }, { status: 400 });
+  if (files.length > (kind === "sound" ? 1 : 3)) {
+    return NextResponse.json({ error: kind === "sound" ? "Upload one sound file" : "Up to 3 files at a time" }, { status: 400 });
+  }
 
-  const allowed = kind === "menu" ? IMAGE_TYPES : [...IMAGE_TYPES, ...DOC_TYPES];
+  const allowed = kind === "menu" ? IMAGE_TYPES : kind === "sound" ? AUDIO_TYPES : [...IMAGE_TYPES, ...DOC_TYPES];
+  const maxBytes = kind === "sound" ? MAX_SOUND_BYTES : MAX_BYTES;
   const uploaded: { id: string; url: string; filename: string; mimeType: string; size: number }[] = [];
 
   for (const file of files) {
     if (!allowed.includes(file.type)) {
       return NextResponse.json(
-        { error: kind === "menu" ? "Please upload a JPG, PNG, WEBP or GIF image." : "Only images or PDF files are allowed." },
+        {
+          error:
+            kind === "menu"
+              ? "Please upload a JPG, PNG, WEBP or GIF image."
+              : kind === "sound"
+                ? "Please upload an MP3, WAV, M4A or OGG audio file."
+                : "Only images or PDF files are allowed.",
+        },
         { status: 415 },
       );
     }
-    if (file.size > MAX_BYTES) {
-      return NextResponse.json({ error: `"${file.name}" is larger than 2 MB.` }, { status: 413 });
+    if (file.size > maxBytes) {
+      return NextResponse.json({ error: `"${file.name}" is larger than ${maxBytes / 1024 / 1024} MB.` }, { status: 413 });
     }
 
     const bytes = new Uint8Array(await file.arrayBuffer());

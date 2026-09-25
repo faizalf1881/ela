@@ -132,6 +132,9 @@ model Order {
   status          OrderStatus   @default(PENDING)
   /// When `status` last changed — guards against a QR label being read twice.
   statusChangedAt DateTime?
+  /// When the order became real (COD placed / online payment verified). Drives
+  /// the staff new-order alert; unpaid checkouts never get one.
+  placedAt        DateTime?
   paymentMethod   String        @default("razorpay") // razorpay | cod | manual
   paymentStatus   PaymentStatus @default(UNPAID)
 
@@ -146,6 +149,7 @@ model Order {
   @@unique([subscriptionId, deliveryDate])
   @@index([status])
   @@index([customerId])
+  @@index([placedAt])
 }
 
 model OrderItem {
@@ -184,6 +188,12 @@ model StoreSetting {
   /// order. PLACED and DELIVERED are always included; the middle steps are
   /// optional so a kitchen can, e.g., go straight from confirmed to dispatch.
   scanSteps OrderStatus[] @default([PLACED, PREPARING, OUT_FOR_DELIVERY, DELIVERED])
+
+  /// New-order alert: an admin-uploaded sound (served from /api/media/<id>),
+  /// null = the built-in chime; and how long the full-screen alert stays up.
+  orderSoundUrl     String?
+  orderSoundName    String?
+  orderAlertSeconds Int     @default(8)
 
   updatedAt DateTime @updatedAt
 }

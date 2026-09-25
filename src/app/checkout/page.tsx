@@ -25,6 +25,22 @@ import { Footer, WhatsAppFab } from "@/components/site/Footer";
 import { useCart } from "@/lib/cart";
 import { useAuth } from "@/lib/auth-client";
 import { inr } from "@/lib/utils";
+import { playSound, unlockAudio } from "@/lib/order-sound";
+import { DEFAULT_ORDER_SOUND } from "@/lib/order-sound-config";
+
+/**
+ * The restaurant's order sound, played once when an order is confirmed (spec
+ * #51) — never on a refresh or a revisit, and never before the server has
+ * actually created (and, for online payment, verified) the order.
+ */
+function playOrderConfirmation(orderId: string, soundUrl: string) {
+  const key = `ela.orderChime.${orderId}`;
+  try {
+    if (localStorage.getItem(key)) return;
+    localStorage.setItem(key, "1");
+  } catch {}
+  void playSound(soundUrl);
+}
 
 type RazorpayResponse = {
   razorpay_payment_id: string;
@@ -68,11 +84,12 @@ export default function CheckoutPage() {
   const [couponBusy, setCouponBusy] = useState(false);
   const [placed, setPlaced] = useState<null | { id: string; total: number; method: string; balanceDue?: number }>(null);
   const [busy, setBusy] = useState(false);
-  const [store, setStore] = useState<{ accepting: boolean; message: string | null; codEnabled: boolean; codConfirmAmount: number }>({
+  const [store, setStore] = useState<{ accepting: boolean; message: string | null; codEnabled: boolean; codConfirmAmount: number; soundUrl: string }>({
     accepting: true,
     message: null,
     codEnabled: true,
     codConfirmAmount: 0,
+    soundUrl: DEFAULT_ORDER_SOUND,
   });
 
   useEffect(() => {
@@ -84,6 +101,7 @@ export default function CheckoutPage() {
           message: d.closedMessage,
           codEnabled: d.codEnabled ?? true,
           codConfirmAmount: d.codConfirmAmount ?? 0,
+          soundUrl: d.orderSoundUrl || DEFAULT_ORDER_SOUND,
         }),
       )
       .catch(() => {});
@@ -182,6 +200,9 @@ export default function CheckoutPage() {
     if (!form.locationId) return toast.error("Please choose a delivery location");
     if (slotsConfigured && (!form.date || !form.slotId)) return toast.error("Please choose a delivery date and time");
 
+    // Browsers only allow sound that follows a tap: prepare it now, play it
+    // once the order is confirmed (after payment, for online orders).
+    unlockAudio(store.soundUrl);
     setBusy(true);
     let modalOpened = false;
     try {
@@ -210,6 +231,7 @@ export default function CheckoutPage() {
 
       if (data.paymentMethod === "cod") {
         setPlaced({ id: data.order.id, total: data.order.total, method: "cod" });
+        playOrderConfirmation(data.order.id, store.soundUrl);
         clear();
         toast.success("Order placed! Pay cash on delivery.");
         return;
@@ -241,6 +263,7 @@ export default function CheckoutPage() {
             const vd = await vr.json();
             if (!vr.ok) throw new Error(vd.error || "Verification failed");
             setPlaced({ id: vd.order.id, total: vd.order.total, method: codConfirm ? "cod" : "razorpay", balanceDue: vd.order.codBalanceDue ?? 0 });
+            playOrderConfirmation(vd.order.id, store.soundUrl);
             clear();
             toast.success(
               codConfirm

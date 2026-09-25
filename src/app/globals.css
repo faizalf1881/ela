@@ -205,3 +205,20 @@
 @utility animate-marquee {
   animation: marquee 40s linear infinite;
 }
+
+/* New-order alert (spec #50): tick pops in, countdown bar drains. */
+@keyframes alert-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  60% { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); }
+}
+@keyframes alert-drain {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+@utility animate-alert-pop {
+  animation: alert-pop 0.55s var(--ease-luxe) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-alert-pop { animation: none; }
+}

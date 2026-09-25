@@ -68,7 +68,8 @@ export async function finalizeOrder(orderId: string, opts: { strict?: boolean } 
 
     return tx.order.update({
       where: { id: orderId },
-      data: { invoiceNo },
+      // placedAt = the moment the order became real; staff alerts key off it.
+      data: { invoiceNo, placedAt: new Date() },
       include: { items: true },
     });
   });

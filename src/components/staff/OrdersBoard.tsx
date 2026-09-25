@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
@@ -28,6 +28,8 @@ import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
 import { ExportMenu } from "@/components/staff/ExportMenu";
 import { CameraScanner, type ScanFeedback } from "@/components/staff/CameraScanner";
+import { FOCUS_ORDER_EVENT, FOCUS_ORDER_KEY, NEW_ORDERS_EVENT } from "@/components/staff/NewOrderAlerts";
+import { isAlertMuted, setAlertMuted, subscribeAlertMuted } from "@/lib/order-sound";
 import {
   KITCHEN_STATUSES,
   STATUS_BADGE,
@@ -63,7 +65,7 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("active");
   const [saving, setSaving] = useState<string | null>(null);
-  const [muted, setMuted] = useState(false);
+  const muted = useSyncExternalStore(subscribeAlertMuted, isAlertMuted, () => false);
   const [, setTick] = useState(0); // forces elapsed-time re-render
   const [scan, setScan] = useState("");
   const [scanned, setScanned] = useState<string | null>(null); // highlighted order id
@@ -71,7 +73,6 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
   const [scanBanner, setScanBanner] = useState<(ScanFeedback & { key: number }) | null>(null);
   const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const seenRef = useRef<Set<string> | null>(null);
   const mutedRef = useRef(false);
   mutedRef.current = muted;
   const audioRef = useRef<AudioContext | null>(null);
@@ -98,42 +99,57 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
       }
     } catch {}
   }, []);
-  const beep = useCallback(() => tone([[880, 0], [1174, 0.18]]), [tone]);
 
   const load = useCallback(async () => {
     try {
       const res = await fetch("/api/orders", { cache: "no-store" });
       if (!res.ok) return;
       const data = await res.json();
-      const next: OrderDTO[] = data.orders;
-
-      // New-order detection (skip on first load).
-      const activeIds = next.filter((o) => o.status === "PLACED").map((o) => o.id);
-      if (seenRef.current === null) {
-        seenRef.current = new Set(activeIds);
-      } else {
-        const fresh = activeIds.filter((id) => !seenRef.current!.has(id));
-        if (fresh.length > 0) {
-          beep();
-          toast.success(`${fresh.length} new order${fresh.length > 1 ? "s" : ""}!`, { duration: 6000 });
-        }
-        for (const id of activeIds) seenRef.current!.add(id);
-      }
-      setOrders(next);
+      setOrders(data.orders);
     } finally {
       setLoading(false);
     }
-  }, [beep]);
+  }, []);
+
+  /** Highlight an order and bring it into view (from a scan or the new-order alert). */
+  const focusOrder = useCallback((id: string) => {
+    setFilter("all");
+    setScanned(id);
+    setTimeout(() => document.getElementById(`order-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 80);
+  }, []);
 
   useEffect(() => {
-    load();
+    load().then(() => {
+      // Arrived here from "View order" on the alert.
+      try {
+        const id = sessionStorage.getItem(FOCUS_ORDER_KEY);
+        if (id) {
+          sessionStorage.removeItem(FOCUS_ORDER_KEY);
+          focusOrder(id);
+        }
+      } catch {}
+    });
     const poll = setInterval(load, 10_000);
     const tick = setInterval(() => setTick((t) => t + 1), 20_000);
+    // The alert watcher saw new orders: refresh now rather than on the next poll.
+    const onNew = () => void load();
+    const onFocus = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail;
+      if (!id) return;
+      try {
+        sessionStorage.removeItem(FOCUS_ORDER_KEY);
+      } catch {}
+      void load().then(() => focusOrder(id));
+    };
+    window.addEventListener(NEW_ORDERS_EVENT, onNew);
+    window.addEventListener(FOCUS_ORDER_EVENT, onFocus);
     return () => {
       clearInterval(poll);
       clearInterval(tick);
+      window.removeEventListener(NEW_ORDERS_EVENT, onNew);
+      window.removeEventListener(FOCUS_ORDER_EVENT, onFocus);
     };
-  }, [load]);
+  }, [load, focusOrder]);
 
   async function setStatus(id: string, status: OrderStatus) {
     setSaving(id);
@@ -285,7 +301,13 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
           >
             <Camera className="h-4 w-4" />
           </button>
-          <button onClick={() => setMuted((m) => !m)} className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border hover:bg-muted" title={muted ? "Unmute alerts" : "Mute alerts"}>
+          <button
+            onClick={() => setAlertMuted(!muted)}
+            className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border hover:bg-muted"
+            title={muted ? "Turn new-order and scan sounds back on (this device)" : "Mute new-order and scan sounds on this device"}
+            aria-label={muted ? "Unmute sounds" : "Mute sounds"}
+            aria-pressed={muted}
+          >
             {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
           </button>
           <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-full border border-border px-4 py-2 text-sm hover:bg-muted" title="Export the orders currently in view">

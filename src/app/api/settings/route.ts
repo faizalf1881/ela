@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import { audit, actorFrom } from "@/lib/audit";
 import { getStoreSetting, CACHE_TAGS } from "@/lib/menu-cache";
+import { DEFAULT_ORDER_SOUND } from "@/lib/order-sound-config";
 
 async function getOrCreate() {
   return (
@@ -25,6 +26,8 @@ export async function GET() {
     orderCutoffMinutes: s?.orderCutoffMinutes ?? 480,
     deliveryDays: s?.deliveryDays ?? [1, 2, 3, 4, 5, 6],
     maxPreorderDays: s?.maxPreorderDays ?? 7,
+    // Played to the customer when their order is confirmed (spec #51).
+    orderSoundUrl: s?.orderSoundUrl || DEFAULT_ORDER_SOUND,
   });
 }
 

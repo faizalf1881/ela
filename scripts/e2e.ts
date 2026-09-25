@@ -115,6 +115,28 @@ async function ageStatusChange(orderId: string) {
   }
 }
 
+/** A tiny valid 16-bit mono WAV — stands in for the restaurant's alert sound. */
+function tinyWav(): Uint8Array {
+  const samples = 800;
+  const dataLen = samples * 2;
+  const b = Buffer.alloc(44 + dataLen);
+  b.write("RIFF", 0);
+  b.writeUInt32LE(36 + dataLen, 4);
+  b.write("WAVE", 8);
+  b.write("fmt ", 12);
+  b.writeUInt32LE(16, 16);
+  b.writeUInt16LE(1, 20);
+  b.writeUInt16LE(1, 22);
+  b.writeUInt32LE(8000, 24);
+  b.writeUInt32LE(16000, 28);
+  b.writeUInt16LE(2, 32);
+  b.writeUInt16LE(16, 34);
+  b.write("data", 36);
+  b.writeUInt32LE(dataLen, 40);
+  for (let i = 0; i < samples; i++) b.writeInt16LE(Math.round(Math.sin(i / 4) * 8000), 44 + i * 2);
+  return new Uint8Array(b);
+}
+
 function section(t: string) {
   console.log(`\n▸ ${t}`);
 }
@@ -989,6 +1011,110 @@ async function main() {
   ok(anonCron.status === 401, "generator is not publicly triggerable → 401");
   const custCron = await customer.fetch("/api/cron/meal-plans", { method: "POST" });
   ok(custCron.status === 401, "customers cannot trigger the generator → 401");
+
+  // ---------- New-order alerts + sound (#48–#51) ----------
+  section("New-order alerts and sound");
+  const anonAlerts = await new Client().fetch("/api/orders/alerts");
+  ok(anonAlerts.status === 401, "alert feed needs a login → 401");
+  const custAlerts = await customer.fetch("/api/orders/alerts");
+  ok(custAlerts.status === 403, "customers cannot read the alert feed → 403");
+  const base = await kitchen.fetch("/api/orders/alerts");
+  const baseJ = await base.json();
+  ok(base.status === 200 && baseJ.baseline === true && !!baseJ.now, "kitchen starts listening (baseline + server clock)");
+
+  const since = baseJ.now as string;
+  const alertCod = await (
+    await customer.fetch("/api/orders", {
+      method: "POST",
+      body: JSON.stringify({ items: [{ id: menu[0].id, qty: 2 }], name: "Alert Test", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: "cod" }),
+    })
+  ).json();
+  const feed1 = await (await kitchen.fetch(`/api/orders/alerts?since=${encodeURIComponent(since)}`)).json();
+  const hit = feed1.orders.find((o: { id: string }) => o.id === alertCod.order.id);
+  ok(!!hit, "a newly placed COD order appears in the alert feed");
+  ok(
+    hit?.customerName === "Alert Test" && hit?.items?.[0]?.qty === 2 && !!hit?.deliveryLocation?.name && !!hit?.placedAt,
+    "alert carries customer, items, delivery location and placed time",
+  );
+
+  const rzpAlert = await (
+    await customer.fetch("/api/orders", {
+      method: "POST",
+      body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "Alert Online", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: "razorpay" }),
+    })
+  ).json();
+  const feed2 = await (await kitchen.fetch(`/api/orders/alerts?since=${encodeURIComponent(since)}`)).json();
+  ok(!feed2.orders.some((o: { id: string }) => o.id === rzpAlert.order.id), "an unpaid online checkout does not alert");
+  const alertPay = "pay_alert_" + crypto.randomBytes(5).toString("hex");
+  await customer.fetch("/api/payments/verify", {
+    method: "POST",
+    body: JSON.stringify({ razorpay_order_id: rzpAlert.razorpay.orderId, razorpay_payment_id: alertPay, razorpay_signature: sign(rzpAlert.razorpay.orderId, alertPay) }),
+  });
+  const feed3 = await (await kitchen.fetch(`/api/orders/alerts?since=${encodeURIComponent(since)}`)).json();
+  ok(feed3.orders.some((o: { id: string }) => o.id === rzpAlert.order.id), "it alerts once the payment is verified");
+
+  const dayFeed = await (await admin.fetch(`/api/orders/alerts?since=${encodeURIComponent(new Date(Date.now() - 86_400_000).toISOString())}`)).json();
+  const boardAll = (await (await admin.fetch("/api/orders")).json()).orders as { id: string; source: string }[];
+  const sourceOf = new Map(boardAll.map((o) => [o.id, o.source]));
+  ok(
+    dayFeed.orders.length > 0 && dayFeed.orders.every((o: { id: string }) => sourceOf.get(o.id) === "web"),
+    "meal-plan and manual orders never trigger the new-order alert",
+  );
+
+  // Alert sound: uploaded by the admin, stored as-is, public for the customer chime.
+  const wav = tinyWav();
+  const soundFd = new FormData();
+  soundFd.append("kind", "sound");
+  soundFd.append("file", new Blob([wav], { type: "audio/wav" }), "ela-order.wav");
+  const upSound = await admin.fetchRaw("/api/uploads", { method: "POST", body: soundFd });
+  const upSoundJ = await upSound.json();
+  ok(upSound.status === 201, `admin uploads the alert sound → 201 ${upSound.status !== 201 ? JSON.stringify(upSoundJ) : ""}`);
+  const soundUrl: string = upSoundJ.files?.[0]?.url ?? "";
+
+  const custSoundFd = new FormData();
+  custSoundFd.append("kind", "sound");
+  custSoundFd.append("file", new Blob([wav], { type: "audio/wav" }), "x.wav");
+  ok((await customer.fetchRaw("/api/uploads", { method: "POST", body: custSoundFd })).status === 403, "customers cannot upload alert sounds → 403");
+  const txtFd = new FormData();
+  txtFd.append("kind", "sound");
+  txtFd.append("file", new Blob([new Uint8Array([104, 105])], { type: "text/plain" }), "not-audio.txt");
+  ok((await admin.fetchRaw("/api/uploads", { method: "POST", body: txtFd })).status === 415, "non-audio file rejected as a sound → 415");
+
+  const setSound = await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ orderSoundUrl: soundUrl }) });
+  const setSoundJ = await setSound.json();
+  ok(setSound.status === 200 && setSoundJ.orderAlert?.customSound?.name === "ela-order.wav", "admin selects the uploaded sound");
+  const kitchenCfg = await (await kitchen.fetch("/api/admin/settings")).json();
+  ok(kitchenCfg.orderAlert?.soundUrl === soundUrl, "kitchen screens receive the new sound");
+  const pubCfg = await (await new Client().fetch("/api/settings")).json();
+  ok(pubCfg.orderSoundUrl === soundUrl, "the customer confirmation uses the same sound");
+
+  const soundRes = await new Client().fetch(soundUrl);
+  const soundBytes = new Uint8Array(await soundRes.arrayBuffer());
+  ok(
+    soundRes.status === 200 && soundRes.headers.get("content-type") === "audio/wav" && soundBytes.length === wav.length && soundBytes.every((b, i) => b === wav[i]),
+    "sound is served publicly, byte-for-byte as uploaded",
+  );
+  const ranged = await new Client().fetch(soundUrl, { headers: { range: "bytes=0-3" } });
+  ok(
+    ranged.status === 206 && ranged.headers.get("content-range") === `bytes 0-3/${wav.length}` && (await ranged.arrayBuffer()).byteLength === 4,
+    "byte ranges supported (needed for iPhone Safari playback)",
+  );
+
+  const wrongKind = await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ orderSoundUrl: menuUrl }) });
+  ok(wrongKind.status === 400, "an image cannot be chosen as the alert sound → 400");
+  const tooShort = await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ orderAlertSeconds: 1 }) });
+  ok(tooShort.status === 400, "alert duration below 3s rejected");
+  const secs = await (await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ orderAlertSeconds: 12 }) })).json();
+  ok(secs.orderAlert?.seconds === 12, "admin sets how long the full-screen alert stays up");
+  const kSound = await kitchen.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ orderSoundUrl: null }) });
+  ok(kSound.status === 403, "kitchen cannot change the alert sound → 403");
+
+  const reset = await (await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ orderSoundUrl: null }) })).json();
+  ok(reset.orderAlert?.customSound === null && reset.orderAlert?.soundUrl === "/sounds/order-chime.wav", "reset to the built-in chime");
+  const chime = await new Client().fetch("/sounds/order-chime.wav");
+  ok(chime.status === 200 && (chime.headers.get("content-type") || "").includes("audio"), "built-in chime is served");
+  const pubCfg2 = await (await new Client().fetch("/api/settings")).json();
+  ok(pubCfg2.orderSoundUrl === "/sounds/order-chime.wav", "customer confirmation falls back to the chime too");
 
   // ---------- Concurrency: no overselling ----------
   section("Stock safety under concurrent orders");
