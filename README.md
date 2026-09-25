@@ -28,7 +28,11 @@ Cormorant Garamond).
   track status, reply in-thread
 - **Membership** (`/membership`) — subscribe with **Razorpay AutoPay (eMandate)**, get an
   automatic discount + free delivery on every order, a **premium gold interface**, and
-  self-service cancellation
+  self-service cancellation. Meal plans ask for the delivery area, time and first day
+- **Order confirmation sound** — the restaurant's sound plays once when an order is
+  confirmed (never on refresh)
+- **Phone-first ordering** — compact menu cards, a sticky total + Place order bar,
+  16px fields (no iOS zoom), no sideways scrolling from 360px up
 
 **Admin**
 - **Accounts** — every invoice with filters (status / method / date / customer),
@@ -57,10 +61,21 @@ Cormorant Garamond).
 - **Dish photo upload** — pick an image from the device (no image hosting needed)
 - Complaints support **file attachments** and **assignment to a staff member**
 
+- **WhatsApp chats** (Admin → WhatsApp) — every customer conversation linked to the CRM,
+  answered by an **AI assistant (OpenAI or Ollama)** until a person takes over; switch
+  back to AI any time; handling states, history and the customer's orders beside the chat
+- **WhatsApp order updates** — automatic message on every status change, with a
+  **message log** (sent / delivered / read / failed + reason) and one-tap retry
+- **New-order alert** — the restaurant's sound + a full-screen green alert with the
+  order's details on every admin/kitchen screen; never replays on refresh
+- **Settings** — alert sound upload, QR scan steps, WhatsApp message wording/template,
+  AI provider
+
 **Kitchen**
 - Live order board, update status through to delivered
-- **Printable delivery label with a scannable QR code** (encodes the order id)
-- **Scan box** — scan a label (or type an order/invoice number) to jump to that order
+- **Printable delivery label with a scannable QR code** (encodes the order id, no status)
+- **Scan to advance** — scanning a label (USB scanner or phone camera, label after
+  label) moves the order to its next step; double reads are ignored
 
 **Engineering**
 - **Full audit trail** — every mutating action (orders, payments, menu, staff, store settings, logins) is recorded in an `AuditLog` table with actor, IP, and before/after metadata; browsable at **Admin → Audit**
@@ -70,7 +85,8 @@ Cormorant Garamond).
 - **Edge middleware** guarding `/admin`, `/kitchen`, `/orders`
 - JWT httpOnly session cookies (jose), bcrypt staff passwords, Zod validation
 - Security headers, SEO (`robots`, `sitemap`, `manifest`), `next/image` optimization
-- **193-check automated end-to-end test** covering every module above
+- **352-check automated end-to-end test** covering every module above, run against
+  local stand-ins for WhatsApp and OpenAI/Ollama (nothing real is ever messaged)
 - Uploads stored in Postgres (2 MB/file cap) — no external object store to configure
 
 ## Roles
@@ -117,11 +133,15 @@ npm run dev            # http://localhost:3000
 Drives all roles + the full Razorpay create/verify flow against a running server.
 
 ```bash
-# terminal 1 — server with output captured so the test can read the OTP
+# terminal 1 — server pointed at the test's WhatsApp/AI stand-in (port 4010),
+# output captured so the test can read the OTP
 npm run build
+WHATSAPP_API_BASE=http://127.0.0.1:4010/v21.0 WHATSAPP_TOKEN=e2e-token \
+WHATSAPP_PHONE_NUMBER_ID=100200300 WHATSAPP_APP_SECRET=e2e-app-secret \
+WHATSAPP_VERIFY_TOKEN=e2e-verify AI_REPLY_DELAY_MS=1000 \
 npx next start > .next/e2e-server.log 2>&1
 
-# terminal 2
+# terminal 2 (use a freshly migrated + seeded database)
 SERVER_LOG=.next/e2e-server.log npm run test:e2e
 ```
 
@@ -213,6 +233,24 @@ keep their old rate until they resubscribe.
 
 ---
 
+## WhatsApp: order updates, customer chat and the AI assistant
+
+1. **Webhook** — Meta → your app → WhatsApp → Configuration → Webhook:
+   callback `https://YOUR-DOMAIN/api/webhooks/whatsapp`, verify token = the value of
+   `WHATSAPP_VERIFY_TOKEN`, subscribe to **messages**. Set `WHATSAPP_APP_SECRET`
+   (App settings → Basic → App secret): unsigned events are refused.
+2. **Order updates** — work as soon as WhatsApp is configured. Free-text messages only
+   reach customers who messaged you in the last 24 hours, so create a **Utility**
+   template with the body `Hi {{1}}, here's an update on your Ela & Co. order {{2}}: {{3}}`
+   and enter its name in **Admin → Settings → WhatsApp order updates**. Failures show in
+   **Admin → WhatsApp Log** (never undo the order's status) and can be retried.
+3. **AI assistant** — **Admin → Settings → AI assistant**: choose OpenAI (paste the API
+   key — stored encrypted, never shown again) or Ollama (a server reachable from the
+   internet), then **Test connection**. With the AI off, every chat waits for staff.
+   The assistant sees only the menu/delivery rules and the one customer's own records,
+   and hands the chat to a person for complaints, refunds, payment problems or when
+   unsure. Staff take over / switch back in **Admin → WhatsApp**.
+
 ## Going live with real WhatsApp OTP
 
 The dev fallback prints OTPs to the server console. To deliver them for real:
@@ -221,8 +259,8 @@ The dev fallback prints OTPs to the server console. To deliver them for real:
 3. Use a **permanent** token for `WHATSAPP_TOKEN`.
 4. Set `OTP_DEV_MODE="false"`.
 
-> ⚠️ **Rotate the Razorpay secret and WhatsApp token** — they were shared in plain
-> text. Regenerate both in their dashboards. Secrets live only in `.env` (gitignored)
+> ⚠️ **Rotate the Razorpay secret, WhatsApp token and OpenAI key** — they were shared in
+> plain text. Regenerate them in their dashboards. Secrets live only in `.env` (gitignored)
 > and `RAZORPAY_KEY_SECRET` never reaches the browser.
 
 ---
