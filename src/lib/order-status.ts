@@ -58,4 +58,13 @@ export type OrderDTO = {
   source?: string;
   subscriptionId?: string | null;
   createdAt: string;
+  /** Staff only: the latest WhatsApp status update for this order. */
+  notifications?: {
+    id: string;
+    toStatus: OrderStatus;
+    status: "PENDING" | "SENT" | "FAILED" | "SKIPPED";
+    deliveryStatus: string | null;
+    error: string | null;
+    createdAt: string;
+  }[];
 };

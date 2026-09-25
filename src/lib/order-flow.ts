@@ -94,7 +94,7 @@ export async function changeOrderStatus(opts: {
 
   // WhatsApp runs after the response: a slow or failing send must never delay
   // the kitchen or undo the status change.
-  after(() => notifyOrderStatus(order));
+  after(() => notifyOrderStatus(order.id, from));
 
   return { changed: true, from, order };
 }

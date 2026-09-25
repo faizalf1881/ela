@@ -23,6 +23,8 @@ import {
   Download,
   XCircle,
   Info,
+  MessageCircle,
+  RotateCw,
 } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
@@ -418,6 +420,7 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
                       {o.paymentMethod === "cod" ? "COD" : o.paymentStatus === "PAID" ? "Paid online" : "Unpaid"}
                     </span>
                   </div>
+                  {o.notifications?.[0] && <WhatsAppUpdate n={o.notifications[0]} onRetried={load} />}
                 </div>
 
                 {/* Primary one-tap action + override */}
@@ -502,6 +505,62 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+type OrderUpdate = NonNullable<OrderDTO["notifications"]>[number];
+
+/** The customer's latest WhatsApp status update for an order, with a retry when it failed (spec #46). */
+function WhatsAppUpdate({ n, onRetried }: { n: OrderUpdate; onRetried: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const what = STATUS_LABEL[n.toStatus];
+  const state =
+    n.status === "FAILED"
+      ? { text: "failed", cls: "text-destructive" }
+      : n.status === "SKIPPED"
+        ? { text: "not sent", cls: "text-muted-foreground" }
+        : n.status === "PENDING"
+          ? { text: "sending…", cls: "text-muted-foreground" }
+          : n.deliveryStatus === "read"
+            ? { text: "✓✓ read", cls: "text-blue-600" }
+            : n.deliveryStatus === "delivered"
+              ? { text: "✓✓ delivered", cls: "text-green-700" }
+              : { text: "✓ sent", cls: "text-green-700" };
+
+  async function retry() {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/admin/notifications/${n.id}/retry`, { method: "POST" });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || "Retry failed");
+      if (d.notification?.status === "SENT") toast.success("WhatsApp update sent");
+      else toast.error(d.notification?.error || "Still failing");
+      onRetried();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Retry failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center justify-between gap-2 pt-1 text-xs" title={n.error || undefined}>
+      <span className="inline-flex min-w-0 items-center gap-1.5 text-muted-foreground">
+        <MessageCircle className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">
+          WhatsApp &ldquo;{what}&rdquo;: <span className={`font-medium ${state.cls}`}>{state.text}</span>
+        </span>
+      </span>
+      {(n.status === "FAILED" || n.status === "SKIPPED") && (
+        <button
+          onClick={retry}
+          disabled={busy}
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-border px-2.5 py-1 font-medium text-foreground hover:bg-muted disabled:opacity-60"
+        >
+          <RotateCw className={`h-3 w-3 ${busy ? "animate-spin" : ""}`} /> Retry
+        </button>
       )}
     </div>
   );

@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import { verifyPaymentSignature } from "@/lib/razorpay";
@@ -38,8 +38,10 @@ export async function POST(req: Request) {
 
   if (!valid) {
     // Signature mismatch — do NOT mark as paid.
+    // Only an unpaid order can be marked failed — a bad or replayed callback
+    // must never downgrade an order that was already paid.
     await prisma.order.updateMany({
-      where: { razorpayOrderId: razorpay_order_id, customerId: s.sub },
+      where: { razorpayOrderId: razorpay_order_id, customerId: s.sub, paymentStatus: "UNPAID" },
       data: { paymentStatus: "FAILED" },
     });
     await audit({ actor: actorFrom(s), action: "order.payment_failed", entityType: "order", summary: "Payment signature verification FAILED", metadata: { razorpay_order_id, razorpay_payment_id }, req });
@@ -51,6 +53,14 @@ export async function POST(req: Request) {
   });
   if (!order) {
     return NextResponse.json({ error: "Order not found" }, { status: 404 });
+  }
+
+  // Already verified (a retried or doubled callback): confirm without touching
+  // the order again — it may already be in the kitchen — and without messaging
+  // the customer twice.
+  if (order.invoiceNo && (order.paymentStatus === "PAID" || order.paymentStatus === "PARTIAL")) {
+    const current = await prisma.order.findUnique({ where: { id: order.id }, include: { items: true } });
+    return NextResponse.json({ ok: true, order: current, alreadyVerified: true });
   }
 
   // A COD order only collects its confirmation amount online — the balance is
@@ -81,8 +91,10 @@ export async function POST(req: Request) {
     metadata: { razorpay_order_id, razorpay_payment_id, total: updated.total, collected, balanceDue: updated.codBalanceDue },
     req,
   });
-  await notifyOrderStatus(updated);
-  await notifyNewOrderToAdmin(updated);
+  after(async () => {
+    await notifyOrderStatus(updated.id, "PENDING");
+    await notifyNewOrderToAdmin(updated);
+  });
 
   return NextResponse.json({ ok: true, order: updated });
 }

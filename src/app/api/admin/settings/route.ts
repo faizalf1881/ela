@@ -7,14 +7,17 @@ import { audit, actorFrom } from "@/lib/audit";
 import { normalizeScanSteps } from "@/lib/order-flow";
 import { CACHE_TAGS } from "@/lib/menu-cache";
 import { DEFAULT_ORDER_SOUND } from "@/lib/order-sound-config";
+import { DEFAULT_MESSAGES, NOTIFY_STATUSES, PLACEHOLDERS, type NotifyStatus } from "@/lib/order-notify";
+import { whatsappConfigured } from "@/lib/whatsapp";
+import type { Prisma } from "@prisma/client";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
  * Operational settings for staff screens (never cached, never public): the
- * QR-scan workflow and the new-order alert. Kitchen staff may read; only admins
- * may change.
+ * QR-scan workflow, the new-order alert and WhatsApp order updates. Kitchen
+ * staff may read; only admins may change.
  */
 async function load() {
   const s =
@@ -26,6 +29,18 @@ async function load() {
       soundUrl: s.orderSoundUrl || DEFAULT_ORDER_SOUND,
       customSound: s.orderSoundUrl ? { url: s.orderSoundUrl, name: s.orderSoundName || "Custom sound" } : null,
       seconds: s.orderAlertSeconds,
+    },
+    notify: {
+      configured: whatsappConfigured(),
+      statuses: s.notifyStatuses.filter((x): x is NotifyStatus => (NOTIFY_STATUSES as readonly string[]).includes(x)),
+      // Custom wording per status; statuses without one use the built-in text.
+      custom: Object.fromEntries(
+        Object.entries((s.notifyMessages as Record<string, unknown> | null) ?? {}).filter(([, v]) => typeof v === "string" && v.trim()),
+      ) as Partial<Record<NotifyStatus, string>>,
+      defaults: DEFAULT_MESSAGES,
+      placeholders: PLACEHOLDERS,
+      template: s.waStatusTemplate,
+      templateLang: s.waStatusTemplateLang,
     },
   };
 }
@@ -41,6 +56,12 @@ const schema = z.object({
   // null = back to the built-in chime.
   orderSoundUrl: z.string().regex(/^\/api\/media\/[a-z0-9]+$/i).nullable().optional(),
   orderAlertSeconds: z.number().int().min(3).max(30).optional(),
+  notifyStatuses: z.array(z.enum(NOTIFY_STATUSES)).max(5).optional(),
+  // null / "" for a status = back to the built-in wording.
+  notifyMessages: z.record(z.enum(NOTIFY_STATUSES), z.string().max(1000).nullable()).optional(),
+  // Meta template names are lower-case letters, digits and underscores.
+  waStatusTemplate: z.string().trim().regex(/^[a-z0-9_]{1,512}$/, "Template names use lower-case letters, digits and _").nullable().or(z.literal("")).optional(),
+  waStatusTemplateLang: z.string().trim().regex(/^[a-z]{2,3}(_[A-Z]{2})?$/).optional(),
 });
 
 export async function PATCH(req: Request) {
@@ -48,7 +69,10 @@ export async function PATCH(req: Request) {
   if (s?.role !== "admin") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const parsed = schema.safeParse(await req.json().catch(() => null));
-  if (!parsed.success) return NextResponse.json({ error: "Invalid settings" }, { status: 400 });
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    return NextResponse.json({ error: first?.message && first.code === "invalid_string" ? first.message : "Invalid settings" }, { status: 400 });
+  }
 
   await load(); // make sure the row exists
   const d = parsed.data;
@@ -57,6 +81,10 @@ export async function PATCH(req: Request) {
     orderSoundUrl?: string | null;
     orderSoundName?: string | null;
     orderAlertSeconds?: number;
+    notifyStatuses?: NotifyStatus[];
+    notifyMessages?: Prisma.InputJsonValue;
+    waStatusTemplate?: string | null;
+    waStatusTemplateLang?: string;
   } = {};
   const changes: string[] = [];
 
@@ -85,6 +113,25 @@ export async function PATCH(req: Request) {
     data.orderAlertSeconds = d.orderAlertSeconds;
     changes.push(`New-order alert shows for ${d.orderAlertSeconds}s`);
   }
+  if (d.notifyStatuses) {
+    data.notifyStatuses = NOTIFY_STATUSES.filter((x) => d.notifyStatuses!.includes(x));
+    changes.push(`WhatsApp updates sent for: ${data.notifyStatuses.join(", ") || "no statuses"}`);
+  }
+  if (d.notifyMessages) {
+    const current = await prisma.storeSetting.findUnique({ where: { id: 1 }, select: { notifyMessages: true } });
+    const merged: Record<string, string> = { ...((current?.notifyMessages as Record<string, string> | null) ?? {}) };
+    for (const [status, text] of Object.entries(d.notifyMessages)) {
+      if (text && text.trim()) merged[status] = text.trim();
+      else delete merged[status];
+    }
+    data.notifyMessages = merged;
+    changes.push(`WhatsApp update wording changed (${Object.keys(d.notifyMessages).join(", ")})`);
+  }
+  if (d.waStatusTemplate !== undefined) {
+    data.waStatusTemplate = d.waStatusTemplate || null;
+    changes.push(data.waStatusTemplate ? `WhatsApp status template set to ${data.waStatusTemplate}` : "WhatsApp status template removed");
+  }
+  if (d.waStatusTemplateLang) data.waStatusTemplateLang = d.waStatusTemplateLang;
 
   await prisma.storeSetting.update({ where: { id: 1 }, data });
   // The customer confirmation sound is served through the cached public settings.

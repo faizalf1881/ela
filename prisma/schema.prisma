@@ -146,10 +146,51 @@ model Order {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  notifications OrderNotification[]
+
   @@unique([subscriptionId, deliveryDate])
   @@index([status])
   @@index([customerId])
   @@index([placedAt])
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+/// One automatic WhatsApp status message to a customer (spec #45/#46). A
+/// failed send is recorded here for follow-up; it never undoes the status.
+model OrderNotification {
+  id             String             @id @default(cuid())
+  order          Order              @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orderId        String
+  customerName   String
+  phone          String
+  fromStatus     OrderStatus?
+  toStatus       OrderStatus
+  kind           String             @default("order_status")
+  /// template | text — how it was (last) sent.
+  messageType    String?
+  templateName   String?
+  body           String
+  status         NotificationStatus @default(PENDING)
+  /// Delivery receipt from WhatsApp webhooks: sent | delivered | read | failed.
+  deliveryStatus String?
+  waMessageId    String?            @unique
+  response       Json?
+  error          String?
+  attempts       Int                @default(0)
+  sentAt         DateTime?
+  deliveredAt    DateTime?
+  readAt         DateTime?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([orderId])
+  @@index([status, createdAt])
 }
 
 model OrderItem {
@@ -194,6 +235,14 @@ model StoreSetting {
   orderSoundUrl     String?
   orderSoundName    String?
   orderAlertSeconds Int     @default(8)
+
+  /// WhatsApp order-status messages (spec #45): which statuses notify the
+  /// customer, custom wording per status ({status: text}, missing = built-in),
+  /// and the approved utility template used outside WhatsApp's 24-hour window.
+  notifyStatuses       OrderStatus[] @default([PLACED, PREPARING, OUT_FOR_DELIVERY, DELIVERED, CANCELLED])
+  notifyMessages       Json?
+  waStatusTemplate     String?
+  waStatusTemplateLang String        @default("en")
 
   updatedAt DateTime @updatedAt
 }

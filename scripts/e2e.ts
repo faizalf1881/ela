@@ -4,6 +4,7 @@
  * Or use scripts/run-e2e.ps1 which orchestrates both.
  */
 import crypto from "node:crypto";
+import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
@@ -137,6 +138,59 @@ function tinyWav(): Uint8Array {
   return new Uint8Array(b);
 }
 
+/**
+ * Stand-in for the WhatsApp Cloud API. The app under test is started with
+ * WHATSAPP_API_BASE pointing here, so no real message can ever be sent.
+ * `wa.mode` makes it fail the way the real API does.
+ */
+type WaCall = { url: string; body: { to?: string; type?: string; text?: { body?: string }; template?: { name?: string; components?: { parameters?: { text?: string }[] }[] } } };
+const wa = { calls: [] as WaCall[], mode: "ok" as "ok" | "fail-auth" | "fail-template" | "fail-window", next: 1 };
+const WA_APP_SECRET = process.env.E2E_WA_APP_SECRET || "e2e-app-secret";
+const WA_VERIFY_TOKEN = process.env.E2E_WA_VERIFY_TOKEN || "e2e-verify";
+
+function startFakeWhatsApp(port = 4010): Promise<http.Server> {
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      let body: WaCall["body"] = {};
+      try {
+        body = JSON.parse(raw);
+      } catch {}
+      wa.calls.push({ url: req.url || "", body });
+      const send = (status: number, obj: unknown) => {
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(obj));
+      };
+      if (wa.mode === "fail-auth") return send(401, { error: { message: "Authentication Error", type: "OAuthException", code: 190 } });
+      if (wa.mode === "fail-template" && body.type === "template") return send(404, { error: { message: "(#132001) Template name does not exist in the translation", code: 132001 } });
+      if (wa.mode === "fail-window" && body.type === "text") {
+        return send(400, { error: { message: "(#131047) Re-engagement message", code: 131047, error_data: { details: "More than 24 hours have passed since the customer last replied." } } });
+      }
+      send(200, { messaging_product: "whatsapp", contacts: [{ input: body.to, wa_id: body.to }], messages: [{ id: `wamid.E2E${wa.next++}` }] });
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", () => resolve(server));
+  });
+}
+
+/** Signs a webhook body the way Meta does (X-Hub-Signature-256). */
+function waSign(raw: string) {
+  return "sha256=" + crypto.createHmac("sha256", WA_APP_SECRET).update(raw).digest("hex");
+}
+
+async function waitFor<T>(fn: () => Promise<T | null | undefined | false>, ms = 6000): Promise<T | null> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const v = await fn();
+    if (v) return v;
+    await sleep(150);
+  }
+  return null;
+}
+
 function section(t: string) {
   console.log(`\n▸ ${t}`);
 }
@@ -201,6 +255,7 @@ function sign(orderId: string, paymentId: string) {
 
 async function main() {
   console.log(`E2E against ${BASE}\n`);
+  const waServer = await startFakeWhatsApp();
 
   // ---------- Public menu ----------
   section("Public menu");
@@ -1117,6 +1172,164 @@ async function main() {
   ok(pubCfg2.orderSoundUrl === "/sounds/order-chime.wav", "customer confirmation falls back to the chime too");
   await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ orderAlertSeconds: 8 }) }); // leave the default
 
+  // ---------- WhatsApp order updates + log (#45/#46) ----------
+  section("WhatsApp order updates and log");
+  type Note = { id: string; orderId: string; toStatus: string; fromStatus: string | null; status: string; messageType: string | null; templateName: string | null; waMessageId: string | null; deliveryStatus: string | null; error: string | null; attempts: number; body: string; response: unknown };
+  const notesFor = async (orderId: string): Promise<Note[]> => (await (await admin.fetch(`/api/admin/notifications?orderId=${orderId}`)).json()).notifications;
+  const noteFor = (orderId: string, to: string) => waitFor(async () => (await notesFor(orderId)).find((n) => n.toStatus === to && n.status !== "PENDING"));
+  const placeCod = async (qty = 1) =>
+    (
+      await (
+        await customer.fetch("/api/orders", {
+          method: "POST",
+          body: JSON.stringify({ items: [{ id: menu[0].id, qty }], name: "E2E Customer", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: "cod" }),
+        })
+      ).json()
+    ).order as { id: string; invoiceNo: string };
+  const setStatus = (id: string, status: string) => kitchen.fetch(`/api/orders/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) });
+
+  const waCfg = (await (await admin.fetch("/api/admin/settings")).json()).notify;
+  ok(waCfg?.configured === true && waCfg.statuses.length === 5, "WhatsApp is connected (test stand-in) with all five updates on");
+
+  wa.mode = "ok";
+  const nOrder = await placeCod();
+  const placedNote = await noteFor(nOrder.id, "PLACED");
+  ok(placedNote?.status === "SENT" && !!placedNote.waMessageId && placedNote.messageType === "text", "placing an order sends the 'confirmed' update (logged as sent)");
+  const placedCall = wa.calls.find((c) => c.body.text?.body?.includes(nOrder.id.slice(-6).toUpperCase()));
+  ok(!!placedCall && placedCall.body.to === "91" + phone && /Order confirmed/.test(placedCall.body.text?.body ?? ""), "it goes to the customer's own WhatsApp number");
+
+  const prep = await setStatus(nOrder.id, "PREPARING");
+  ok(prep.status === 200, "kitchen moves the order to Preparing");
+  const prepNote = await noteFor(nOrder.id, "PREPARING");
+  ok(prepNote?.status === "SENT" && prepNote.fromStatus === "PLACED", "status change triggers an update, recording previous → new status");
+  ok(Array.isArray(prepNote?.response) && (prepNote?.response as unknown[]).length === 1, "the WhatsApp API response is stored");
+
+  const sameAgain2 = await setStatus(nOrder.id, "PREPARING");
+  await sleep(600);
+  ok(sameAgain2.status === 200 && (await notesFor(nOrder.id)).filter((n) => n.toStatus === "PREPARING").length === 1, "no message when the status did not actually change");
+
+  // Webhook: verification handshake + signed delivery receipts.
+  const verifyOk = await new Client().fetch(`/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=${WA_VERIFY_TOKEN}&hub.challenge=12345`);
+  ok(verifyOk.status === 200 && (await verifyOk.text()) === "12345", "webhook verification handshake answers Meta's challenge");
+  const verifyBad = await new Client().fetch(`/api/webhooks/whatsapp?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=1`);
+  ok(verifyBad.status === 403, "wrong verify token → 403");
+  const receipt = (status: string, id: string, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ id: "WABA", changes: [{ field: "messages", value: { messaging_product: "whatsapp", statuses: [{ id, status, timestamp: String(Math.floor(Date.now() / 1000)), recipient_id: "91" + phone, ...extra }] } }] }],
+    });
+  const postHook = (raw: string, sig?: string) =>
+    new Client().fetch("/api/webhooks/whatsapp", { method: "POST", body: raw, headers: sig ? { "x-hub-signature-256": sig } : {} });
+  const unsigned = await postHook(receipt("delivered", prepNote!.waMessageId!));
+  ok(unsigned.status === 401, "unsigned webhook events are rejected → 401");
+  const forged = await postHook(receipt("delivered", prepNote!.waMessageId!), "sha256=" + "0".repeat(64));
+  ok(forged.status === 401, "wrongly signed webhook events are rejected → 401");
+  const dRaw = receipt("delivered", prepNote!.waMessageId!);
+  const delivered = await postHook(dRaw, waSign(dRaw));
+  ok(delivered.status === 200 && (await delivered.json()).receipts === 1, "signed 'delivered' receipt accepted");
+  const rRaw = receipt("read", prepNote!.waMessageId!);
+  await postHook(rRaw, waSign(rRaw));
+  const lateRaw = receipt("delivered", prepNote!.waMessageId!);
+  await postHook(lateRaw, waSign(lateRaw));
+  const readNote = (await notesFor(nOrder.id)).find((n) => n.toStatus === "PREPARING");
+  ok(readNote?.deliveryStatus === "read", "delivery → read receipts recorded (a late 'delivered' does not undo 'read')");
+
+  // A failed message never rolls the order back; it is logged for follow-up.
+  wa.mode = "fail-auth";
+  const out = await setStatus(nOrder.id, "OUT_FOR_DELIVERY");
+  ok(out.status === 200 && (await out.json()).order?.status === "OUT_FOR_DELIVERY", "status still changes when WhatsApp is down");
+  const failedNote = await noteFor(nOrder.id, "OUT_FOR_DELIVERY");
+  ok(failedNote?.status === "FAILED" && /access token/i.test(failedNote.error || ""), `failure logged with a reason staff can act on ("${failedNote?.error?.slice(0, 48)}…")`);
+  const orderAfterFail = await (await admin.fetch(`/api/orders/${nOrder.id}`)).json();
+  ok(orderAfterFail.order?.status === "OUT_FOR_DELIVERY", "order remains Out for delivery after the failed message");
+  const failedList = await (await admin.fetch("/api/admin/notifications?status=FAILED")).json();
+  ok(failedList.failed24h >= 1 && failedList.notifications.some((n: Note) => n.id === failedNote?.id), "failed updates are listed for admin follow-up");
+  const boardNow = (await (await kitchen.fetch("/api/orders")).json()).orders.find((o: { id: string }) => o.id === nOrder.id);
+  ok(boardNow?.notifications?.[0]?.status === "FAILED", "the Orders board shows the failed update on the order");
+  const custOrders = (await (await customer.fetch("/api/orders")).json()).orders.find((o: { id: string }) => o.id === nOrder.id);
+  ok(custOrders && custOrders.notifications === undefined, "customers never see the internal message log");
+
+  wa.mode = "ok";
+  const retried = await kitchen.fetch(`/api/admin/notifications/${failedNote!.id}/retry`, { method: "POST" });
+  const retriedJ = await retried.json();
+  ok(retried.status === 200 && retriedJ.notification?.status === "SENT" && retriedJ.notification.attempts === 2, "retry sends it once WhatsApp is back (2 attempts recorded)");
+  const retryAgain = await admin.fetch(`/api/admin/notifications/${failedNote!.id}/retry`, { method: "POST" });
+  ok(retryAgain.status === 409, "an update that was sent cannot be sent twice → 409");
+
+  const fRaw = receipt("failed", retriedJ.notification.waMessageId, { errors: [{ code: 131026, title: "Message undeliverable" }] });
+  await postHook(fRaw, waSign(fRaw));
+  const undeliv = (await notesFor(nOrder.id)).find((n) => n.id === failedNote!.id);
+  ok(undeliv?.status === "FAILED" && undeliv.deliveryStatus === "failed" && /131026/.test(undeliv.error || ""), "a 'failed' delivery receipt flags the update for follow-up");
+
+  // Admin controls: which statuses notify, and their wording.
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ notifyStatuses: ["PLACED", "PREPARING", "OUT_FOR_DELIVERY", "CANCELLED"] }) });
+  await setStatus(nOrder.id, "DELIVERED");
+  await sleep(900);
+  ok(!(await notesFor(nOrder.id)).some((n) => n.toStatus === "DELIVERED"), "a status switched off in Settings sends nothing");
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ notifyStatuses: ["PLACED", "PREPARING", "OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED"] }) });
+
+  const custom = await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ notifyMessages: { PREPARING: "Hi {name}! {order} is on the stove ({total})." } }) });
+  ok(custom.status === 200 && (await custom.json()).notify.custom.PREPARING?.includes("on the stove"), "admin saves custom wording");
+  const o2 = await placeCod(2);
+  await noteFor(o2.id, "PLACED");
+  await setStatus(o2.id, "PREPARING");
+  const customNote = await noteFor(o2.id, "PREPARING");
+  ok(customNote?.body === `Hi E2E! #${o2.id.slice(-6).toUpperCase()} is on the stove (₹${(await (await admin.fetch(`/api/orders/${o2.id}`)).json()).order.total.toLocaleString("en-IN")}).`, `custom wording with details filled in ("${customNote?.body}")`);
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ notifyMessages: { PREPARING: null } }) });
+
+  const badTpl = await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ waStatusTemplate: "Order Update!" }) });
+  ok(badTpl.status === 400, "invalid template name rejected → 400");
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ waStatusTemplate: "order_status_update", waStatusTemplateLang: "en" }) });
+  wa.calls.length = 0;
+  await setStatus(o2.id, "OUT_FOR_DELIVERY");
+  const tplNote = await noteFor(o2.id, "OUT_FOR_DELIVERY");
+  const tplCall = wa.calls.find((c) => c.body.type === "template");
+  const tplParams = tplCall?.body.template?.components?.[0]?.parameters?.map((x) => x.text) ?? [];
+  ok(tplNote?.messageType === "template" && tplNote.templateName === "order_status_update", "with a template configured, the approved template is used");
+  ok(tplParams[0] === "E2E" && tplParams[1] === `#${o2.id.slice(-6).toUpperCase()}` && !!tplParams[2] && !tplParams[2].includes("\n"), "template gets name, order number and a one-line message");
+
+  wa.mode = "fail-template";
+  await setStatus(o2.id, "DELIVERED");
+  const fbNote = await noteFor(o2.id, "DELIVERED");
+  ok(fbNote?.status === "SENT" && fbNote.messageType === "text" && (fbNote.response as unknown[]).length === 2, "if the template is rejected, it falls back to a plain message (both attempts logged)");
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ waStatusTemplate: null }) });
+
+  wa.mode = "fail-window";
+  const o3 = await placeCod();
+  const windowNote = await noteFor(o3.id, "PLACED");
+  ok(windowNote?.status === "FAILED" && /24 hours/.test(windowNote.error || ""), "outside the 24-hour window (no template) the reason is explained");
+  wa.mode = "ok";
+
+  const custLog = await customer.fetch("/api/admin/notifications");
+  ok(custLog.status === 403, "customers cannot read the message log → 403");
+
+  // Payment callbacks are idempotent: a repeated verify must not reset or re-notify.
+  const pay = await (
+    await customer.fetch("/api/orders", {
+      method: "POST",
+      body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E Customer", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: "razorpay" }),
+    })
+  ).json();
+  const payId = "pay_idem_" + crypto.randomBytes(5).toString("hex");
+  const verifyBody = JSON.stringify({ razorpay_order_id: pay.razorpay.orderId, razorpay_payment_id: payId, razorpay_signature: sign(pay.razorpay.orderId, payId) });
+  const v1 = await customer.fetch("/api/payments/verify", { method: "POST", body: verifyBody });
+  ok(v1.status === 200, "payment verified");
+  await noteFor(pay.order.id, "PLACED");
+  await setStatus(pay.order.id, "PREPARING");
+  const v2 = await customer.fetch("/api/payments/verify", { method: "POST", body: verifyBody });
+  const v2j = await v2.json();
+  ok(v2.status === 200 && v2j.alreadyVerified === true, "a repeated payment callback is acknowledged");
+  const afterRepeat = await (await admin.fetch(`/api/orders/${pay.order.id}`)).json();
+  ok(afterRepeat.order?.status === "PREPARING", "…without moving the order back to Confirmed");
+  await sleep(600);
+  ok((await notesFor(pay.order.id)).filter((n) => n.toStatus === "PLACED").length === 1, "…and without messaging the customer twice");
+  const forgedPay = await customer.fetch("/api/payments/verify", {
+    method: "POST",
+    body: JSON.stringify({ razorpay_order_id: pay.razorpay.orderId, razorpay_payment_id: payId, razorpay_signature: "bad" }),
+  });
+  const afterForged = await (await admin.fetch(`/api/orders/${pay.order.id}`)).json();
+  ok(forgedPay.status === 400 && afterForged.order?.paymentStatus === "PAID", "a bad signature can no longer mark a paid order as failed");
+
   // ---------- Concurrency: no overselling ----------
   section("Stock safety under concurrent orders");
   const scarce = await admin.fetch("/api/menu", {
@@ -1158,9 +1371,9 @@ async function main() {
   const auditData = await auditRes.json();
   ok(auditRes.status === 200, "GET /api/admin/audit → 200 (admin)");
   ok(auditData.total > 0, `audit recorded ${auditData.total} events`);
-  const acts = new Set((auditData.logs as { action: string }[]).map((l) => l.action));
-  for (const a of ["order.created", "order.status_changed", "order.paid", "menu.created", "auth.staff_login", "auth.customer_login", "settings.updated"]) {
-    ok(acts.has(a), `audit captured ${a}`);
+  for (const a of ["order.created", "order.status_changed", "order.paid", "menu.created", "auth.staff_login", "auth.customer_login", "settings.updated", "notification.retried"]) {
+    const hit = await (await admin.fetch(`/api/admin/audit?action=${a}&limit=1`)).json();
+    ok(hit.total > 0, `audit captured ${a}`);
   }
   const anonAudit = await new Client().fetch("/api/admin/audit");
   ok(anonAudit.status === 403, "audit viewer is admin-only → 403 for anon");
@@ -1169,6 +1382,8 @@ async function main() {
   section("Cleanup");
   const del = await admin.fetch(`/api/menu/${testItem.id}`, { method: "DELETE" });
   ok(del.status === 200, "test menu item deleted");
+
+  waServer.close();
 
   // ---------- summary ----------
   console.log(`\n${"=".repeat(48)}`);

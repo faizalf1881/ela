@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
@@ -39,9 +39,23 @@ export async function GET(req: Request) {
         ? { status: status as never }
         : {};
 
+  const staff = s.role !== "customer";
   const orders = await prisma.order.findMany({
     where,
-    include: { items: true, deliverySlot: { select: { id: true, label: true } } },
+    include: {
+      items: true,
+      deliverySlot: { select: { id: true, label: true } },
+      // Staff see the latest WhatsApp update per order, so a failure is noticed.
+      ...(staff
+        ? {
+            notifications: {
+              orderBy: { createdAt: "desc" as const },
+              take: 1,
+              select: { id: true, toStatus: true, status: true, deliveryStatus: true, error: true, createdAt: true },
+            },
+          }
+        : {}),
+    },
     orderBy: { createdAt: "desc" },
     take: 200,
   });
@@ -202,8 +216,11 @@ export async function POST(req: Request) {
   if (paymentMethod === "cod" && !collectsCodConfirmation) {
     try {
       const order = await finalizeOrder(created.id, { strict: true });
-      await notifyOrderStatus(order);
-      await notifyNewOrderToAdmin(order);
+      // WhatsApp after the response: never slows (or fails) the checkout.
+      after(async () => {
+        await notifyOrderStatus(order.id, null);
+        await notifyNewOrderToAdmin(order);
+      });
       return NextResponse.json({ order, paymentMethod: "cod" });
     } catch (e) {
       if (e instanceof OutOfStockError) {

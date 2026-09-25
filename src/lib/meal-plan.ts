@@ -1,8 +1,10 @@
 import "server-only";
+import { after } from "next/server";
 import { prisma } from "./db";
 import { addDays, dateKeyFromDb, istDateKey, toDbDate, weekdayOf } from "./delivery";
 import { finalizeOrder } from "./fulfillment";
 import { audit } from "./audit";
+import { notifyOrderStatus } from "./order-notify";
 
 export type GenerationResult = {
   date: string;
@@ -142,6 +144,15 @@ export async function generateMealPlanOrders(
       // Unique-constraint race (two runs at once) is a skip, not a failure.
       result.skipped.push({ subscriptionId: sub.id, reason: `not created: ${(e as Error).message.split("\n")[0]}` });
     }
+  }
+
+  // Each subscriber hears that today's meal is confirmed — sent after the
+  // response, one at a time, so the scheduled run itself stays quick.
+  if (result.created.length > 0) {
+    const ids = result.created.map((c) => c.orderId);
+    after(async () => {
+      for (const id of ids) await notifyOrderStatus(id, null);
+    });
   }
 
   await audit({

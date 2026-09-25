@@ -3,6 +3,7 @@
 import { StaffShell } from "@/components/staff/StaffShell";
 import { ScanWorkflowSettings } from "@/components/staff/ScanWorkflowSettings";
 import { OrderAlertSettings } from "@/components/staff/OrderAlertSettings";
+import { WhatsAppNotifySettings } from "@/components/staff/WhatsAppNotifySettings";
 
 export default function AdminSettingsPage() {
   return (
@@ -12,6 +13,7 @@ export default function AdminSettingsPage() {
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
         <OrderAlertSettings />
         <ScanWorkflowSettings />
+        <WhatsAppNotifySettings />
       </div>
     </StaffShell>
   );

@@ -1,9 +1,13 @@
 import "server-only";
 import fs from "node:fs";
 
-const GRAPH_VERSION = "v21.0";
+// Overridable so tests can point at a local stand-in for the Graph API.
+const GRAPH_BASE = (process.env.WHATSAPP_API_BASE || "https://graph.facebook.com/v21.0").replace(/\/$/, "");
 
-type SendResult = { ok: boolean; via: "whatsapp" | "console"; error?: string };
+type SendResult = { ok: boolean; via: "whatsapp" | "console"; error?: string; messageId?: string };
+
+/** Raw outcome of one Graph API call, kept for the notification log. */
+export type GraphResult = { ok: boolean; status: number; data: unknown; error?: string; messageId?: string };
 
 function config() {
   const token = process.env.WHATSAPP_TOKEN;
@@ -16,27 +20,64 @@ function config() {
   };
 }
 
-async function post(payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {
+/** True when a phone number id and token are set (real sends are possible). */
+export function whatsappConfigured(): boolean {
+  return config().configured;
+}
+
+async function post(payload: Record<string, unknown>): Promise<GraphResult> {
   const { token, phoneNumberId } = config();
-  const url = `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`;
+  const url = `${GRAPH_BASE}/${phoneNumberId}/messages`;
   try {
     const res = await fetch(url, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15_000),
     });
+    const text = await res.text();
+    let data: unknown = text;
+    try {
+      data = JSON.parse(text);
+    } catch {}
     if (!res.ok) {
-      const text = await res.text();
       // eslint-disable-next-line no-console
       console.error("[WhatsApp] send failed:", res.status, text);
-      return { ok: false, error: `${res.status}: ${text}` };
+      return { ok: false, status: res.status, data, error: `${res.status}: ${text}` };
     }
-    return { ok: true };
+    const messageId = (data as { messages?: { id?: string }[] })?.messages?.[0]?.id;
+    return { ok: true, status: res.status, data, messageId };
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error("[WhatsApp] network error:", e);
-    return { ok: false, error: String(e) };
+    return { ok: false, status: 0, data: null, error: String(e) };
   }
+}
+
+export type OutgoingMessage =
+  | { type: "text"; body: string }
+  | { type: "template"; name: string; lang: string; params: string[] };
+
+/**
+ * Sends one message and returns the raw Graph API outcome (message id on
+ * success, error text otherwise). Used where every attempt must be recorded:
+ * order-status notifications and the CRM chat.
+ */
+export async function sendWhatsApp(phone: string, msg: OutgoingMessage): Promise<GraphResult> {
+  const payload =
+    msg.type === "text"
+      ? { messaging_product: "whatsapp", to: phone, type: "text", text: { body: msg.body, preview_url: false } }
+      : {
+          messaging_product: "whatsapp",
+          to: phone,
+          type: "template",
+          template: {
+            name: msg.name,
+            language: { code: msg.lang },
+            components: msg.params.length ? [{ type: "body", parameters: msg.params.map((t) => ({ type: "text", text: t })) }] : [],
+          },
+        };
+  return post(payload);
 }
 
 /**
@@ -99,7 +140,7 @@ export async function sendOtp(phone: string, code: string): Promise<SendResult> 
   let lastError: string | undefined;
   for (const a of attempts) {
     const r = await post(a.payload);
-    if (r.ok) return { ok: true, via: "whatsapp" };
+    if (r.ok) return { ok: true, via: "whatsapp", messageId: r.messageId };
     lastError = `${a.label} → ${r.error}`;
     // eslint-disable-next-line no-console
     console.error(`[WhatsApp] attempt failed (${a.label}):`, r.error);
@@ -131,5 +172,5 @@ export async function sendWhatsAppText(phone: string, body: string): Promise<Sen
     text: { body },
   });
   if (!r.ok) return { ok: devMode, via: "whatsapp", error: r.error };
-  return { ok: true, via: "whatsapp" };
+  return { ok: true, via: "whatsapp", messageId: r.messageId };
 }
