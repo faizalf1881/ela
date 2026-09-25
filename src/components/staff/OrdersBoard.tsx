@@ -282,15 +282,15 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
             Live
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          <form onSubmit={handleScan}>
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+          <form onSubmit={handleScan} className="min-w-0 basis-full sm:basis-auto">
             <label className="relative block">
               <ScanLine className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <input
                 value={scan}
                 onChange={(e) => setScan(e.target.value)}
                 placeholder="Scan label QR…"
-                className="w-44 rounded-full border border-input bg-background pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60"
+                className="w-full rounded-full border border-input bg-background pl-9 pr-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-gold/60 sm:w-44 sm:py-2 sm:text-sm"
                 title="Scan a delivery-label QR (or type an order/invoice number and press Enter) to move the order to its next step"
               />
             </label>

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
-import { Search, Download, X, Save, Loader2, Phone, MapPin, Calendar, ShoppingBag, Wallet, Crown } from "lucide-react";
+import { Search, Download, X, Save, Loader2, Phone, MapPin, Calendar, ShoppingBag, Wallet, Crown, MessageCircle } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
 import { ExportMenu } from "@/components/staff/ExportMenu";
@@ -179,7 +179,16 @@ function CustomerDetail({ customer, onClose, onSaved }: { customer: Customer; on
             <h2 className="font-serif text-2xl text-foreground">{customer.name || "Customer"}</h2>
             <div className="text-sm text-muted-foreground">{customer.phone}</div>
           </div>
-          <button onClick={onClose} className="h-9 w-9 inline-flex items-center justify-center rounded-full hover:bg-muted"><X className="h-4 w-4" /></button>
+          <div className="flex items-center gap-2">
+            {/* Opens (or waits for) this customer's WhatsApp conversation in the inbox. */}
+            <Link
+              href={`/admin/whatsapp?phone=${encodeURIComponent(customer.phone)}`}
+              className="inline-flex items-center gap-1.5 rounded-full bg-[#25D366]/15 px-3 py-1.5 text-xs font-medium text-[#128C7E] hover:bg-[#25D366]/25"
+            >
+              <MessageCircle className="h-3.5 w-3.5" /> WhatsApp chat
+            </Link>
+            <button onClick={onClose} className="h-9 w-9 inline-flex items-center justify-center rounded-full hover:bg-muted"><X className="h-4 w-4" /></button>
+          </div>
         </div>
 
         <div className="p-6 space-y-6">

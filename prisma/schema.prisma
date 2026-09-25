@@ -12,16 +12,17 @@ datasource db {
 
 /// Customers authenticate via WhatsApp OTP (phone is the identity).
 model Customer {
-  id            String         @id @default(cuid())
-  phone         String         @unique
+  id            String           @id @default(cuid())
+  phone         String           @unique
   name          String?
   address       String? // saved delivery address / landmark
   notes         String? // admin CRM notes
   lastLoginAt   DateTime?
-  createdAt     DateTime       @default(now())
+  createdAt     DateTime         @default(now())
   orders        Order[]
   tickets       Ticket[]
   subscriptions Subscription[]
+  conversations WaConversation[]
 }
 
 /// One-time passwords for customer login.
@@ -526,4 +527,116 @@ model MediaAsset {
   createdAt DateTime @default(now())
 
   @@index([kind])
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp customer chat with AI / human handling (spec #39–#44)
+// ---------------------------------------------------------------------------
+
+/// Who is in control of a conversation.
+enum ChatMode {
+  AI
+  HUMAN
+}
+
+/// What the conversation needs right now (shown to staff, spec #42).
+enum ChatState {
+  AI_HANDLING
+  HUMAN_HANDLING
+  WAITING_CUSTOMER
+  REQUIRES_ATTENTION
+}
+
+enum ChatSender {
+  CUSTOMER
+  AI
+  STAFF
+  SYSTEM
+}
+
+/// One WhatsApp conversation per phone number, linked to the CRM customer
+/// with that number (none for numbers that never signed up).
+model WaConversation {
+  id              String            @id @default(cuid())
+  /// Digits with country code, exactly as WhatsApp sends it (wa_id).
+  phone           String            @unique
+  customer        Customer?         @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerId      String?
+  /// The name on the person's WhatsApp profile.
+  profileName     String?
+  mode            ChatMode          @default(AI)
+  state           ChatState         @default(AI_HANDLING)
+  attentionReason String?
+  unreadCount     Int               @default(0)
+  lastMessageAt   DateTime?
+  /// The customer's last message: WhatsApp allows free replies for 24h after it.
+  lastInboundAt   DateTime?
+  lastPreview     String?
+  handledByLabel  String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  messages        WaMessage[]
+  events          WaHandlingEvent[]
+
+  @@index([state])
+  @@index([lastMessageAt])
+  @@index([customerId])
+}
+
+model WaMessage {
+  id             String         @id @default(cuid())
+  conversation   WaConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId String
+  /// in = from the customer, out = to the customer.
+  direction      String
+  sender         ChatSender
+  staffLabel     String?
+  /// text | image | audio | video | document | sticker | location | ...
+  type           String         @default("text")
+  body           String
+  waMessageId    String?        @unique
+  /// Outbound only: sent | delivered | read | failed.
+  status         String?
+  error          String?
+  createdAt      DateTime       @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+/// Handling history: every switch between AI and staff and every state change,
+/// with who did it and why (spec #41/#42).
+model WaHandlingEvent {
+  id             String         @id @default(cuid())
+  conversation   WaConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId String
+  fromMode       ChatMode?
+  toMode         ChatMode
+  fromState      ChatState?
+  toState        ChatState
+  /// staff | ai | system
+  actorType      String
+  actorLabel     String?
+  reason         String?
+  createdAt      DateTime       @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+/// The AI assistant's configuration (spec #43). A single row. The OpenAI key is
+/// stored encrypted and is never sent back to the browser.
+model AiSetting {
+  id            Int      @id @default(1)
+  /// DISABLED | OPENAI | OLLAMA
+  provider      String   @default("DISABLED")
+  openaiModel   String   @default("gpt-4o-mini")
+  openaiKeyEnc  String?
+  openaiKeyHint String?
+  /// Optional OpenAI-compatible endpoint (blank = api.openai.com).
+  openaiBaseUrl String?
+  ollamaUrl     String?
+  ollamaModel   String   @default("llama3.1")
+  temperature   Float    @default(0.3)
+  /// Extra guidance for the assistant: FAQs, tone, today's specials.
+  instructions  String?
+  updatedAt     DateTime @updatedAt
 }

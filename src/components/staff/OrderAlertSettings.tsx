@@ -170,7 +170,7 @@ export function OrderAlertSettings() {
           <p className="text-xs leading-relaxed text-muted-foreground">
             Browsers only play sound after someone has clicked the page once, so a screen that was just opened shows a
             &ldquo;Tap to turn on new-order sound&rdquo; button until then. For an unattended kitchen display, start Chrome with{" "}
-            <code className="rounded bg-muted px-1">--autoplay-policy=no-user-gesture-required</code>. Each order alerts once per
+            <code className="break-all rounded bg-muted px-1">--autoplay-policy=no-user-gesture-required</code>. Each order alerts once per
             device; refreshing does not replay it.
           </p>
         </div>

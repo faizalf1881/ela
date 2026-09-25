@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText, MapPin, TicketPercent, Wallet, Contact, Star, LifeBuoy, Crown, CalendarClock, Settings, MessageCircle } from "lucide-react";
+import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText, MapPin, TicketPercent, Wallet, Contact, Star, LifeBuoy, Crown, CalendarClock, Settings, MessageCircle, MessagesSquare } from "lucide-react";
 import { useAuth, type Role } from "@/lib/auth-client";
 import { BrandLogo } from "@/components/site/BrandLogo";
 
@@ -17,6 +17,7 @@ const ADMIN_NAV = [
   { href: "/admin/coupons", label: "Coupons", icon: TicketPercent },
   { href: "/admin/memberships", label: "Memberships", icon: Crown },
   { href: "/admin/crm", label: "Customers", icon: Contact },
+  { href: "/admin/whatsapp", label: "WhatsApp", icon: MessagesSquare },
   { href: "/admin/reviews", label: "Reviews", icon: Star },
   { href: "/admin/complaints", label: "Support", icon: LifeBuoy },
   { href: "/admin/notifications", label: "WhatsApp Log", icon: MessageCircle },
@@ -25,6 +26,43 @@ const ADMIN_NAV = [
   { href: "/admin/settings", label: "Settings", icon: Settings },
 ];
 const KITCHEN_NAV = [{ href: "/kitchen", label: "Kitchen Board", icon: ChefHat }];
+
+/**
+ * Counts that need an admin's eye, shown on the nav: WhatsApp chats waiting for
+ * a person, and WhatsApp order updates that failed in the last day.
+ */
+function useNavBadges(enabled: boolean): Record<string, number> {
+  const [badges, setBadges] = useState<Record<string, number>>({});
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    async function load() {
+      try {
+        const [chat, notes] = await Promise.all([
+          fetch("/api/admin/whatsapp/summary", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
+          fetch("/api/admin/notifications?status=FAILED&limit=1", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)),
+        ]);
+        if (!alive) return;
+        setBadges({
+          "/admin/whatsapp": (chat?.attention ?? 0) + (chat?.waitingOnStaff ?? 0),
+          "/admin/notifications": notes?.failed24h ?? 0,
+        });
+      } catch {}
+    }
+    void load();
+    const t = setInterval(load, 30_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [enabled]);
+  return badges;
+}
+
+function NavBadge({ n }: { n?: number }) {
+  if (!n) return null;
+  return <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold text-white">{n > 99 ? "99+" : n}</span>;
+}
 
 /**
  * Keeps the horizontal nav where the admin left it. Next.js remounts this shell on
@@ -79,6 +117,7 @@ export function StaffShell({ allow, children }: { allow: Role[]; children: React
   const ready = !loading && !!user && allow.includes(user.role);
   const desktopNavRef = useStickyNavScroll("ela-nav-scroll-desktop", ready);
   const mobileNavRef = useStickyNavScroll("ela-nav-scroll-mobile", ready);
+  const badges = useNavBadges(ready && user?.role === "admin");
 
   useEffect(() => {
     if (loading) return;
@@ -125,6 +164,7 @@ export function StaffShell({ allow, children }: { allow: Role[]; children: React
                     }`}
                   >
                     <Icon className="h-4 w-4" /> {label}
+                    <NavBadge n={badges[href]} />
                   </Link>
                 );
               })}
@@ -155,6 +195,7 @@ export function StaffShell({ allow, children }: { allow: Role[]; children: React
                   }`}
                 >
                   <Icon className="h-3.5 w-3.5" /> {label}
+                  <NavBadge n={badges[href]} />
                 </Link>
               );
             })}

@@ -145,6 +145,16 @@ function tinyWav(): Uint8Array {
  */
 type WaCall = { url: string; body: { to?: string; type?: string; text?: { body?: string }; template?: { name?: string; components?: { parameters?: { text?: string }[] }[] } } };
 const wa = { calls: [] as WaCall[], mode: "ok" as "ok" | "fail-auth" | "fail-template" | "fail-window", next: 1 };
+type AiCall = { url: string; body: { model?: string; messages?: { role: string; content: string }[]; format?: string; response_format?: unknown } };
+const ai = { calls: [] as AiCall[], mode: "ok" as "ok" | "fail" };
+
+/** Scripted model: hands off on "refund", otherwise answers normally (so the keyword safety net can be tested). */
+function fakeAiAnswer(body: AiCall["body"]): string {
+  const lastUser = [...(body.messages ?? [])].reverse().find((m) => m.role === "user")?.content ?? "";
+  if (/ping/.test(lastUser)) return JSON.stringify({ reply: "pong" });
+  if (/refund/i.test(lastUser)) return JSON.stringify({ reply: "I'm sorry about that. A team member will take over here shortly.", handoff: true, reason: "Refund request" });
+  return JSON.stringify({ reply: `Thanks! (AI) You said: ${lastUser.slice(0, 40)}`, handoff: false, reason: "" });
+}
 const WA_APP_SECRET = process.env.E2E_WA_APP_SECRET || "e2e-app-secret";
 const WA_VERIFY_TOKEN = process.env.E2E_WA_VERIFY_TOKEN || "e2e-verify";
 
@@ -157,11 +167,21 @@ function startFakeWhatsApp(port = 4010): Promise<http.Server> {
       try {
         body = JSON.parse(raw);
       } catch {}
-      wa.calls.push({ url: req.url || "", body });
       const send = (status: number, obj: unknown) => {
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(obj));
       };
+      // OpenAI-compatible and Ollama chat endpoints.
+      if (req.url?.startsWith("/v1/chat/completions") || req.url?.startsWith("/api/chat")) {
+        const aiBody = body as unknown as AiCall["body"];
+        ai.calls.push({ url: req.url, body: aiBody });
+        if (ai.mode === "fail") return send(500, { error: { message: "The model server had an error" } });
+        const content = fakeAiAnswer(aiBody);
+        return req.url.startsWith("/api/chat")
+          ? send(200, { model: aiBody.model, message: { role: "assistant", content }, done: true })
+          : send(200, { choices: [{ index: 0, message: { role: "assistant", content } }] });
+      }
+      wa.calls.push({ url: req.url || "", body });
       if (wa.mode === "fail-auth") return send(401, { error: { message: "Authentication Error", type: "OAuthException", code: 190 } });
       if (wa.mode === "fail-template" && body.type === "template") return send(404, { error: { message: "(#132001) Template name does not exist in the translation", code: 132001 } });
       if (wa.mode === "fail-window" && body.type === "text") {
@@ -1329,6 +1349,265 @@ async function main() {
   });
   const afterForged = await (await admin.fetch(`/api/orders/${pay.order.id}`)).json();
   ok(forgedPay.status === 400 && afterForged.order?.paymentStatus === "PAID", "a bad signature can no longer mark a paid order as failed");
+
+  // ---------- WhatsApp chat with AI / human handling (#39–#44) ----------
+  section("WhatsApp chat: inbox, AI and human handling");
+  const custPhone = "91" + phone;
+  let inboundSeq = 0;
+  const inbound = (from: string, text: string, opts: { id?: string; name?: string } = {}) => {
+    const raw = JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [
+        {
+          id: "WABA",
+          changes: [
+            {
+              field: "messages",
+              value: {
+                messaging_product: "whatsapp",
+                metadata: { display_phone_number: "917907577979", phone_number_id: "100200300" },
+                contacts: [{ profile: { name: opts.name ?? "Anjali WA" }, wa_id: from }],
+                messages: [{ from, id: opts.id ?? `wamid.IN${Date.now()}${inboundSeq++}`, timestamp: String(Math.floor(Date.now() / 1000)), type: "text", text: { body: text } }],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    return postHook(raw, waSign(raw));
+  };
+  type Conv = { id: string; phone: string; customerId: string | null; mode: string; state: string; unreadCount: number; attentionReason: string | null; handledByLabel: string | null; profileName: string | null };
+  type ChatMsg = { id: string; sender: string; direction: string; body: string; status: string | null; waMessageId: string | null; staffLabel: string | null };
+  const listConvs = async (qs = "") => (await (await admin.fetch(`/api/admin/whatsapp/conversations${qs}`)).json()) as { conversations: Conv[]; counts: Record<string, number> };
+  const convByPhone = async (p: string) => (await listConvs()).conversations.find((c) => c.phone === p);
+  const detail = async (id: string) =>
+    (await (await admin.fetch(`/api/admin/whatsapp/conversations/${id}`)).json()) as {
+      conversation: Conv;
+      messages: ChatMsg[];
+      events: { actorType: string; toMode: string; toState: string; reason: string | null }[];
+      updates: { toStatus: string }[];
+      context: { customer: { name: string } | null; orders: { ref: string }[] };
+      replyWindow: { open: boolean };
+    };
+  const aiMsgs = async (id: string) => (await detail(id)).messages.filter((m) => m.sender === "AI");
+  const convAction = (id: string, action: string, body?: unknown) =>
+    admin.fetch(`/api/admin/whatsapp/conversations/${id}/${action}`, { method: "POST", body: body ? JSON.stringify(body) : undefined });
+  const lastPrompt = () => ai.calls[ai.calls.length - 1]?.body.messages ?? [];
+
+  // Access: the inbox is admin-only.
+  ok((await new Client().fetch("/api/admin/whatsapp/conversations")).status === 401, "inbox needs a login → 401");
+  ok((await customer.fetch("/api/admin/whatsapp/conversations")).status === 403, "customers cannot open the inbox → 403");
+  ok((await kitchen.fetch("/api/admin/whatsapp/conversations")).status === 403, "kitchen staff cannot open the inbox → 403");
+
+  // A second customer, so privacy can be checked.
+  const phone2 = "8" + String(Date.now()).slice(-9);
+  await new Client().fetch("/api/auth/otp/request", { method: "POST", body: JSON.stringify({ phone: phone2, mode: "signup" }) });
+  const other = new Client();
+  await other.fetch("/api/auth/otp/verify", { method: "POST", body: JSON.stringify({ phone: phone2, code: await readOtp("91" + phone2), name: "Zara Other" }) });
+  const otherOrder = (
+    await (
+      await other.fetch("/api/orders", {
+        method: "POST",
+        body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "Zara Other", phone: "+91" + phone2, deliveryLocationId: locationId, ...sched, paymentMethod: "cod" }),
+      })
+    ).json()
+  ).order as { id: string };
+
+  // AI off (the default): the message waits for a person.
+  const firstId = `wamid.FIRST${Date.now()}`;
+  const in1 = await inbound(custPhone, "Hi, is the Kerala meal available today?", { id: firstId });
+  ok(in1.status === 200 && (await in1.json()).messages === 1, "incoming WhatsApp message accepted (signed webhook)");
+  const conv = await waitFor(async () => {
+    const c = await convByPhone(custPhone);
+    return c?.state === "REQUIRES_ATTENTION" ? c : null;
+  });
+  ok(!!conv && conv.customerId === crmMe.id, "conversation created and linked to the right CRM customer");
+  ok(conv?.unreadCount === 1 && conv.profileName === "Anjali WA", "shows as unread, with the WhatsApp profile name");
+  ok(!!conv?.attentionReason && /turned off/i.test(conv.attentionReason), "with the AI off, it is flagged Requires attention");
+  const dupeIn = await inbound(custPhone, "Hi, is the Kerala meal available today?", { id: firstId });
+  ok((await dupeIn.json()).messages === 0 && (await detail(conv!.id)).messages.length === 1, "a redelivered webhook message is stored only once");
+
+  // AI settings: provider, encrypted key (never returned), test connection.
+  const aiKey = "sk-e2e-" + crypto.randomBytes(16).toString("hex");
+  const badKey = await admin.fetch("/api/admin/ai", { method: "PATCH", body: JSON.stringify({ openaiKey: "not-a-key" }) });
+  ok(badKey.status === 400, "a malformed API key is rejected");
+  ok((await kitchen.fetch("/api/admin/ai", { method: "PATCH", body: JSON.stringify({ provider: "OPENAI" }) })).status === 403, "only admins configure the AI → 403");
+  const setAi = await admin.fetch("/api/admin/ai", {
+    method: "PATCH",
+    body: JSON.stringify({ provider: "OPENAI", openaiKey: aiKey, openaiModel: "gpt-4o-mini", openaiBaseUrl: "http://127.0.0.1:4010/v1", instructions: "Mention that Friday is fish day." }),
+  });
+  const setAiJ = await setAi.json();
+  ok(setAi.status === 200 && setAiJ.provider === "OPENAI" && setAiJ.keySource === "admin", "admin selects OpenAI and saves the key");
+  ok(!JSON.stringify(setAiJ).includes(aiKey) && setAiJ.keyHint === `${aiKey.slice(0, 7)}…${aiKey.slice(-4)}`, "the key is never sent back — only a hint");
+  const aiRowRaw = await (async () => {
+    const pc = new PrismaClient();
+    try {
+      return await pc.aiSetting.findUnique({ where: { id: 1 } });
+    } finally {
+      await pc.$disconnect();
+    }
+  })();
+  ok(!!aiRowRaw?.openaiKeyEnc?.startsWith("v1:") && !aiRowRaw.openaiKeyEnc.includes(aiKey.slice(7)), "the key is stored encrypted in the database");
+  const aiTest = await (await admin.fetch("/api/admin/ai/test", { method: "POST" })).json();
+  ok(aiTest.ok === true && aiTest.provider === "OpenAI gpt-4o-mini", "Test connection reaches the provider");
+
+  // The AI answers, using this customer's own data only.
+  ai.calls.length = 0;
+  await inbound(custPhone, "What does my last order have?");
+  const firstAi = await waitFor(async () => {
+    const m = await aiMsgs(conv!.id);
+    return m.length >= 1 && m[0].status !== "sending" ? m : null;
+  });
+  ok(!!firstAi && firstAi[0].status === "sent" && !!firstAi[0].waMessageId, "the AI replies through WhatsApp");
+  ok(wa.calls.some((c) => c.body.to === custPhone && c.body.text?.body?.startsWith("Thanks! (AI)")), "the reply goes to the customer's WhatsApp");
+  const sys = lastPrompt()[0]?.content ?? "";
+  ok(sys.includes(`#${nOrder.id.slice(-6).toUpperCase()}`) && sys.includes(menu[0].name), "the AI sees this customer's orders and the live menu");
+  ok(sys.includes("Friday is fish day"), "the admin's extra guidance reaches the AI");
+  ok(!sys.includes("Zara Other") && !sys.includes(phone2) && !sys.includes(otherOrder.id.slice(-6).toUpperCase()), "no other customer's data is ever in the AI's context");
+  ok(lastPrompt().some((m) => m.role === "user" && m.content.includes("Kerala meal available")), "earlier messages are passed as conversation history");
+  ok((await convByPhone(custPhone))?.state === "AI_HANDLING", "state returns to AI handling after a good reply");
+
+  // Two quick messages get one reply.
+  const before2 = (await aiMsgs(conv!.id)).length;
+  await inbound(custPhone, "hello");
+  await inbound(custPhone, "are you open today?");
+  await waitFor(async () => ((await aiMsgs(conv!.id)).length > before2 ? true : null));
+  await sleep(1200);
+  ok((await aiMsgs(conv!.id)).length === before2 + 1, "a burst of messages gets a single AI reply");
+
+  // The AI hands over when it should.
+  await inbound(custPhone, "I want a refund, the payment went twice");
+  const handed = await waitFor(async () => {
+    const c = await convByPhone(custPhone);
+    return c?.mode === "HUMAN" ? c : null;
+  });
+  ok(handed?.state === "REQUIRES_ATTENTION" && handed.attentionReason === "Refund request", "refund request → AI hands over (Human mode, Requires attention)");
+  const handoffEvent = (await detail(conv!.id)).events.find((e) => e.actorType === "ai" && e.toMode === "HUMAN");
+  ok(!!handoffEvent && handoffEvent.reason === "Refund request", "the hand-over is recorded in the handling history");
+
+  const aiBeforeHuman = (await aiMsgs(conv!.id)).length;
+  await inbound(custPhone, "hello?? anyone there");
+  await sleep(1500);
+  const humanNow = await convByPhone(custPhone);
+  ok((await aiMsgs(conv!.id)).length === aiBeforeHuman, "in Human mode the AI stays silent");
+  ok(humanNow?.state === "REQUIRES_ATTENTION" && (humanNow?.unreadCount ?? 0) > 0, "…and the new message waits, unread, for staff");
+
+  // Staff take over and reply through WhatsApp.
+  const take = await convAction(conv!.id, "takeover");
+  const takeJ = await take.json();
+  ok(take.status === 200 && takeJ.conversation.state === "HUMAN_HANDLING" && takeJ.conversation.handledByLabel === ADMIN_USER, "staff take over (Human handling, by name)");
+  const staffMsg = await convAction(conv!.id, "messages", { body: "Sorry about that! I've checked and started your refund." });
+  const staffJ = await staffMsg.json();
+  ok(staffMsg.status === 200 && staffJ.message.sender === "STAFF" && staffJ.message.staffLabel === ADMIN_USER, "staff reply is sent and recorded as Staff");
+  ok(wa.calls.some((c) => c.body.text?.body === "Sorry about that! I've checked and started your refund."), "…through the WhatsApp API");
+  const afterStaff = await convByPhone(custPhone);
+  ok(afterStaff?.state === "WAITING_CUSTOMER" && afterStaff.unreadCount === 0, "after replying: Waiting for customer, marked read");
+  await inbound(custPhone, "thank you!");
+  const replied = await waitFor(async () => {
+    const c = await convByPhone(custPhone);
+    return c?.state === "HUMAN_HANDLING" ? c : null;
+  });
+  ok(!!replied, "customer replies → back to Human handling (staff's turn)");
+
+  // Switch back to AI: history is kept and used.
+  const back = await convAction(conv!.id, "handback");
+  ok(back.status === 200 && (await back.json()).conversation.mode === "AI", "switch back to AI");
+  const aiSend = await convAction(conv!.id, "messages", { body: "should not send" });
+  ok(aiSend.status === 409, "staff can't type over the AI — take over first → 409");
+  ai.calls.length = 0;
+  await inbound(custPhone, "When will my order arrive?");
+  await waitFor(async () => (ai.calls.length ? true : null));
+  await sleep(600);
+  ok(lastPrompt().some((m) => m.role === "assistant" && m.content.includes("[Team member] Sorry about that")), "the AI resumes with the whole conversation, including what staff said");
+
+  // Repeated switching keeps everything.
+  const msgCount = (await detail(conv!.id)).messages.length;
+  for (const a of ["takeover", "handback", "takeover", "handback"]) await convAction(conv!.id, a);
+  const afterSwitch = await detail(conv!.id);
+  ok(afterSwitch.messages.length === msgCount && afterSwitch.conversation.mode === "AI", "AI → Human → AI → Human → AI loses no messages");
+  ok(afterSwitch.events.filter((e) => e.actorType === "staff").length >= 6, "every switch is in the handling history");
+
+  // Safety net: clear complaints always reach a person, even if the model misses it.
+  await inbound(custPhone, "my food was late and cold");
+  const forced = await waitFor(async () => {
+    const c = await convByPhone(custPhone);
+    return c?.mode === "HUMAN" ? c : null;
+  });
+  ok(!!forced && forced.state === "REQUIRES_ATTENTION" && /late/.test(forced.attentionReason || ""), "a complaint the model didn't flag is still handed to a person");
+  const holding = (await aiMsgs(conv!.id)).pop();
+  ok(!!holding && /team/i.test(holding.body) && !holding.body.startsWith("Thanks! (AI)"), "…with a safe holding reply instead of the model's answer");
+
+  // Ollama works the same way.
+  await admin.fetch("/api/admin/ai", { method: "PATCH", body: JSON.stringify({ provider: "OLLAMA", ollamaUrl: "http://127.0.0.1:4010", ollamaModel: "llama3.1" }) });
+  await convAction(conv!.id, "handback");
+  ai.calls.length = 0;
+  await inbound(custPhone, "Do you deliver to Kowdiar?");
+  await waitFor(async () => (ai.calls.some((c) => c.url.startsWith("/api/chat")) ? true : null));
+  const ollamaReply = await waitFor(async () => ((await aiMsgs(conv!.id)).some((m) => m.body.includes("Kowdiar")) ? true : null));
+  ok(!!ollamaReply && ai.calls.some((c) => c.url.startsWith("/api/chat") && c.body.model === "llama3.1" && c.body.format === "json"), "switching the provider to Ollama needs no code change");
+
+  // Provider down: flagged, nothing half-sent.
+  ai.mode = "fail";
+  const aiBeforeFail = (await aiMsgs(conv!.id)).length;
+  await inbound(custPhone, "is the payasam sweet?");
+  const down = await waitFor(async () => {
+    const c = await convByPhone(custPhone);
+    return c?.state === "REQUIRES_ATTENTION" ? c : null;
+  });
+  ok(!!down && /couldn't reply/.test(down.attentionReason || "") && (await aiMsgs(conv!.id)).length === aiBeforeFail, "if the AI provider fails, the chat is flagged for a person");
+  ai.mode = "ok";
+
+  // Numbers that never signed up still get help, with no customer data.
+  const stranger = "919999" + String(Date.now()).slice(-6);
+  ai.calls.length = 0;
+  await inbound(stranger, "Hello, do you cater for weddings?", { name: "Stranger" });
+  const strangerConv = await waitFor(async () => {
+    const c = await convByPhone(stranger);
+    return c && (await aiMsgs(c.id)).length ? c : null;
+  });
+  ok(!!strangerConv && strangerConv.customerId === null, "an unknown number gets its own conversation, not linked to anyone");
+  const strangerSys = lastPrompt()[0]?.content ?? "";
+  ok(/not a registered customer/.test(strangerSys) && !strangerSys.includes("E2E Customer") && !strangerSys.includes(nOrder.id.slice(-6).toUpperCase()), "…and the AI sees no customer's records for it");
+
+  // Delivery receipts for chat replies.
+  const lastAi = (await aiMsgs(conv!.id)).filter((m) => m.waMessageId).pop()!;
+  const cr1 = receipt("delivered", lastAi.waMessageId!);
+  await postHook(cr1, waSign(cr1));
+  const cr2 = receipt("read", lastAi.waMessageId!);
+  await postHook(cr2, waSign(cr2));
+  ok((await detail(conv!.id)).messages.find((m) => m.id === lastAi.id)?.status === "read", "chat replies show delivered/read receipts");
+
+  // Staff view: CRM context, order updates, search, filters, read.
+  const d = await detail(conv!.id);
+  ok(d.context.customer?.name === "E2E Customer" && d.context.orders.length > 0, "staff see the customer's profile and recent orders beside the chat");
+  ok(d.updates.length > 0 && d.replyWindow.open === true, "…the order updates sent to this number, and the 24-hour reply window");
+  ok((await listConvs("?q=Anjali")).conversations.some((c) => c.id === conv!.id), "search by WhatsApp name");
+  ok((await listConvs(`?q=${phone.slice(-5)}`)).conversations.some((c) => c.id === conv!.id), "search by phone number");
+  ok((await listConvs("?q=payasam")).conversations.some((c) => c.id === conv!.id), "search by message text");
+  const attn = await listConvs("?filter=attention");
+  ok(attn.conversations.every((c) => c.state === "REQUIRES_ATTENTION") && (attn.counts.REQUIRES_ATTENTION ?? 0) >= 1, "filter: Requires attention (with counts)");
+  await convAction(conv!.id, "read");
+  ok((await convByPhone(custPhone))?.unreadCount === 0, "opening the chat clears its unread count");
+
+  // WhatsApp's 24-hour rule is respected.
+  await convAction(conv!.id, "takeover");
+  await (async () => {
+    const pc = new PrismaClient();
+    try {
+      await pc.waConversation.update({ where: { id: conv!.id }, data: { lastInboundAt: new Date(Date.now() - 2 * 86_400_000) } });
+    } finally {
+      await pc.$disconnect();
+    }
+  })();
+  const late = await convAction(conv!.id, "messages", { body: "Hello?" });
+  ok(late.status === 409 && /24 hours/.test((await late.json()).error), "outside the 24-hour window staff are told why a reply can't be sent");
+
+  const summary = await (await admin.fetch("/api/admin/whatsapp/summary")).json();
+  ok(typeof summary.attention === "number" && typeof summary.unread === "number", "nav badge summary");
+  const aiAudit = await (await admin.fetch("/api/admin/audit?action=ai.settings_updated&limit=5")).json();
+  ok(aiAudit.total > 0 && !JSON.stringify(aiAudit.logs).includes(aiKey), "AI settings changes are audited without the key");
+  const hand = await (await admin.fetch("/api/admin/audit?action=whatsapp.takeover&limit=1")).json();
+  ok(hand.total > 0, "takeovers are audited");
 
   // ---------- Concurrency: no overselling ----------
   section("Stock safety under concurrent orders");

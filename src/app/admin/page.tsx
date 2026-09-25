@@ -8,7 +8,7 @@ import { CodSettings } from "@/components/staff/CodSettings";
 export default function AdminOrdersPage() {
   return (
     <StaffShell allow={["admin"]}>
-      <div className="mb-6 grid gap-4 lg:grid-cols-2">
+      <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
         <StoreToggle />
         <CodSettings />
       </div>
