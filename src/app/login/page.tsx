@@ -140,7 +140,7 @@ export default function CustomerLoginPage() {
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Anjali Nair"
                   required
-                  className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60"
+                  className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-gold/60 sm:text-sm"
                 />
               </label>
             )}
@@ -155,7 +155,7 @@ export default function CustomerLoginPage() {
                 placeholder="+91 79075 77979"
                 inputMode="tel"
                 required
-                className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60"
+                className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-gold/60 sm:text-sm"
               />
             </label>
 

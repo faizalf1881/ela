@@ -60,7 +60,7 @@ export default async function HomePage() {
       <Gallery />
       <CTA />
       <Footer />
-      <WhatsAppFab />
+      <WhatsAppFab mobile="above-cart" />
       <CartBar />
     </main>
   );

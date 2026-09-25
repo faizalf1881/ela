@@ -1115,6 +1115,7 @@ async function main() {
   ok(chime.status === 200 && (chime.headers.get("content-type") || "").includes("audio"), "built-in chime is served");
   const pubCfg2 = await (await new Client().fetch("/api/settings")).json();
   ok(pubCfg2.orderSoundUrl === "/sounds/order-chime.wav", "customer confirmation falls back to the chime too");
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ orderAlertSeconds: 8 }) }); // leave the default
 
   // ---------- Concurrency: no overselling ----------
   section("Stock safety under concurrent orders");

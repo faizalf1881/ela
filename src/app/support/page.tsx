@@ -182,24 +182,24 @@ function NewTicket({ onClose, onCreated }: { onClose: () => void; onCreated: () 
         <div className="mt-4 space-y-3">
           <label className="block">
             <span className="text-xs text-muted-foreground">Issue category</span>
-            <select value={category} onChange={(e) => setCategory(e.target.value)} className="mt-1 w-full rounded-xl border border-input bg-background px-3 py-2.5 text-sm">
+            <select value={category} onChange={(e) => setCategory(e.target.value)} className="mt-1 w-full rounded-xl border border-input bg-background px-3 py-2.5 text-base sm:text-sm">
               {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           </label>
           <label className="block">
             <span className="text-xs text-muted-foreground">Related order (optional)</span>
-            <select value={orderId} onChange={(e) => setOrderId(e.target.value)} className="mt-1 w-full rounded-xl border border-input bg-background px-3 py-2.5 text-sm">
+            <select value={orderId} onChange={(e) => setOrderId(e.target.value)} className="mt-1 w-full rounded-xl border border-input bg-background px-3 py-2.5 text-base sm:text-sm">
               <option value="">Not about a specific order</option>
               {orders.map((o) => <option key={o.id} value={o.id}>{o.invoiceNo || `#${o.id.slice(-6).toUpperCase()}`}</option>)}
             </select>
           </label>
           <label className="block">
             <span className="text-xs text-muted-foreground">Subject</span>
-            <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Short summary" className="mt-1 w-full rounded-xl border border-input bg-background px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
+            <input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Short summary" className="mt-1 w-full rounded-xl border border-input bg-background px-3 py-2.5 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
           </label>
           <label className="block">
             <span className="text-xs text-muted-foreground">Describe the issue</span>
-            <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} className="mt-1 w-full rounded-xl border border-input bg-background px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
+            <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} className="mt-1 w-full rounded-xl border border-input bg-background px-3 py-2.5 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
           </label>
           <FileUpload files={attachments} onChange={setAttachments} disabled={saving} label="Attach photo or document (optional)" />
         </div>
@@ -276,7 +276,7 @@ function TicketThread({ ticket, onClose, onReplied }: { ticket: Ticket; onClose:
                 onChange={(e) => setReply(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
                 placeholder="Write a reply…"
-                className="flex-1 rounded-xl border border-input bg-background px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60"
+                className="flex-1 rounded-xl border border-input bg-background px-3 py-2.5 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-gold/60"
               />
               <button onClick={send} disabled={sending || !reply.trim()} className="rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">
                 {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}

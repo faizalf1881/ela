@@ -11,7 +11,7 @@ export function Story() {
   return (
     <section id="story" className="relative py-24 sm:py-32">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-        <div className="grid lg:grid-cols-2 gap-16 items-center">
+        <div className="grid grid-cols-1 gap-16 items-center lg:grid-cols-2">
           <div className="relative">
             <div className="relative aspect-[4/5] rounded-[2rem] overflow-hidden shadow-elegant ring-1 ring-gold/20">
               <Image src="/story-kerala.jpg" alt="Kerala backwaters at dawn" fill sizes="(max-width: 1024px) 100vw, 50vw" className="object-cover" />

@@ -62,22 +62,22 @@ export default function ReviewCollectionPage() {
             <form onSubmit={submit} className="mt-8 space-y-4">
               <div className="flex justify-center gap-1">
                 {[1, 2, 3, 4, 5].map((n) => (
-                  <button key={n} type="button" onClick={() => setRating(n)} aria-label={`${n} stars`}>
+                  <button key={n} type="button" onClick={() => setRating(n)} aria-label={`${n} stars`} className="inline-flex h-11 w-11 items-center justify-center rounded-full">
                     <Star className={`h-8 w-8 ${n <= rating ? "fill-gold text-gold" : "text-muted-foreground/40"}`} />
                   </button>
                 ))}
               </div>
               <label className="block">
                 <span className="text-xs text-muted-foreground">Your name</span>
-                <input value={name} onChange={(e) => setName(e.target.value)} required className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
+                <input value={name} onChange={(e) => setName(e.target.value)} required className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
               </label>
               <label className="block">
                 <span className="text-xs text-muted-foreground">Area (optional)</span>
-                <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Trivandrum" className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
+                <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="Trivandrum" className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
               </label>
               <label className="block">
                 <span className="text-xs text-muted-foreground">Your review</span>
-                <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} required className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
+                <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={4} required className="mt-1 w-full rounded-xl border border-input bg-background px-4 py-3 text-base sm:text-sm focus:outline-none focus:ring-2 focus:ring-gold/60" />
               </label>
               <button type="submit" disabled={loading} className="w-full inline-flex items-center justify-center gap-2 rounded-full bg-primary px-6 py-3.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60">
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Star className="h-4 w-4" />} Submit review

@@ -12,7 +12,7 @@ export function CartBar() {
     <div className="fixed inset-x-0 bottom-0 z-40 sm:hidden">
       <button
         onClick={openCart}
-        className="mx-3 mb-3 flex w-[calc(100%-1.5rem)] items-center justify-between gap-3 rounded-2xl bg-primary px-4 py-3 pr-20 text-left text-primary-foreground shadow-elegant"
+        className="mx-3 mb-[max(0.75rem,env(safe-area-inset-bottom))] flex w-[calc(100%-1.5rem)] items-center justify-between gap-3 rounded-2xl bg-primary px-4 py-3 text-left text-primary-foreground shadow-elegant"
       >
         <div className="flex items-center gap-3 min-w-0">
           <div className="relative">

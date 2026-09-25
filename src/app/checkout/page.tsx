@@ -82,6 +82,7 @@ export default function CheckoutPage() {
   const [couponInput, setCouponInput] = useState("");
   const [applied, setApplied] = useState<Applied | null>(null);
   const [couponBusy, setCouponBusy] = useState(false);
+  const [couponOpen, setCouponOpen] = useState(false);
   const [placed, setPlaced] = useState<null | { id: string; total: number; method: string; balanceDue?: number }>(null);
   const [busy, setBusy] = useState(false);
   const [store, setStore] = useState<{ accepting: boolean; message: string | null; codEnabled: boolean; codConfirmAmount: number; soundUrl: string }>({
@@ -303,12 +304,12 @@ export default function CheckoutPage() {
     return (
       <main className="min-h-screen bg-background">
         <Navbar />
-        <section className="pt-40 pb-32">
-          <div className="mx-auto max-w-2xl px-6 text-center">
+        <section className="pt-28 pb-16 sm:pt-40 sm:pb-32">
+          <div className="mx-auto max-w-2xl px-5 text-center sm:px-6">
             <div className="mx-auto inline-flex h-16 w-16 items-center justify-center rounded-full bg-forest/10">
               <CheckCircle2 className="h-8 w-8 text-forest" />
             </div>
-            <h1 className="mt-6 font-serif text-5xl text-foreground">Order placed</h1>
+            <h1 className="mt-5 font-serif text-4xl text-foreground sm:mt-6 sm:text-5xl">Order placed</h1>
             <p className="mt-3 text-muted-foreground">
               Your order <strong className="text-foreground">#{placed.id.slice(-6).toUpperCase()}</strong> for{" "}
               <strong className="text-foreground">{inr(placed.total)}</strong>{" "}
@@ -319,14 +320,14 @@ export default function CheckoutPage() {
                 : "is confirmed and paid."}{" "}
               Our kitchen will start preparing it shortly.
             </p>
-            <div className="mt-8 flex flex-wrap gap-3 justify-center">
-              <Link href="/orders" className="inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90">
+            <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:justify-center">
+              <Link href="/orders" className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full bg-primary px-6 py-3 text-sm font-medium text-primary-foreground hover:bg-primary/90">
                 Track your order <ArrowRight className="h-4 w-4" />
               </Link>
-              <Link href={`/orders/${placed.id}/invoice`} className="inline-flex items-center gap-2 rounded-full border border-border px-6 py-3 text-sm font-medium text-foreground hover:bg-muted">
+              <Link href={`/orders/${placed.id}/invoice`} className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full border border-border px-6 py-3 text-sm font-medium text-foreground hover:bg-muted">
                 <FileText className="h-4 w-4" /> View invoice
               </Link>
-              <Link href="/" className="inline-flex items-center gap-2 rounded-full border border-border px-6 py-3 text-sm font-medium text-foreground hover:bg-muted">
+              <Link href="/" className="inline-flex min-h-12 items-center justify-center gap-2 rounded-full border border-border px-6 py-3 text-sm font-medium text-foreground hover:bg-muted">
                 Back to home
               </Link>
             </div>
@@ -337,13 +338,24 @@ export default function CheckoutPage() {
     );
   }
 
+  // One label for both Place-order buttons (summary card on desktop, sticky bar on phones).
+  const ctaLabel = !store.accepting
+    ? "Ordering paused"
+    : form.method === "cod"
+      ? store.codConfirmAmount > 0
+        ? `Pay ${inr(Math.min(store.codConfirmAmount, total))} to confirm`
+        : `Place order · ${inr(total)}`
+      : `Pay ${inr(total)}`;
+  const ctaDisabled = items.length === 0 || busy || !store.accepting;
+  const ctaIcon = busy ? <Loader2 className="h-4 w-4 animate-spin" /> : form.method === "cod" ? <Wallet className="h-4 w-4" /> : <CreditCard className="h-4 w-4" />;
+
   return (
     <main className="min-h-screen bg-background">
       <Navbar />
-      <section className="pt-32 pb-24">
+      <section className="pt-28 pb-10 sm:pt-32 sm:pb-24">
         <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8">
           <div className="text-xs uppercase tracking-[0.3em] text-gold">Checkout</div>
-          <h1 className="mt-3 font-serif text-4xl sm:text-5xl text-foreground">Review &amp; place your order</h1>
+          <h1 className="mt-2 font-serif text-3xl text-foreground sm:mt-3 sm:text-5xl">Review &amp; place your order</h1>
           <p className="mt-2 text-muted-foreground">
             {count === 0 ? "Your cart is empty." : `${count} item${count > 1 ? "s" : ""} in cart.`}
           </p>
@@ -363,9 +375,9 @@ export default function CheckoutPage() {
             </div>
           )}
 
-          <div className="mt-10 grid lg:grid-cols-5 gap-8">
+          <div className="mt-6 grid grid-cols-1 gap-6 sm:mt-10 lg:grid-cols-5 lg:gap-8">
             {/* Cart */}
-            <div className="lg:col-span-3 space-y-4">
+            <div className="min-w-0 space-y-3 sm:space-y-4 lg:col-span-3">
               {items.length === 0 ? (
                 <div className="rounded-3xl border border-dashed border-border p-12 text-center bg-card">
                   <ShoppingBag className="h-8 w-8 mx-auto text-muted-foreground" />
@@ -376,23 +388,29 @@ export default function CheckoutPage() {
                 </div>
               ) : (
                 items.map((i) => (
-                  <div key={i.id} className="flex items-center gap-4 rounded-2xl border border-border bg-card p-4">
-                    <div className="flex-1">
-                      <div className="font-serif text-lg text-foreground">{i.name}</div>
+                  <div key={i.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-2xl border border-border bg-card p-3.5 sm:flex-nowrap sm:gap-4 sm:p-4">
+                    <div className="order-1 min-w-0 flex-1">
+                      <div className="font-serif text-lg leading-snug text-foreground">{i.name}</div>
                       <div className="text-xs text-muted-foreground">{inr(i.price)} each</div>
                     </div>
-                    <div className="inline-flex items-center gap-2 rounded-full bg-muted p-1">
-                      <button onClick={() => setQty(i.id, i.qty - 1)} className="h-8 w-8 inline-flex items-center justify-center rounded-full hover:bg-background" aria-label="Decrease">
+                    <div className="order-2 text-right font-semibold tabular-nums sm:order-3 sm:w-20 sm:font-medium">{inr(i.qty * i.price)}</div>
+                    <div className="order-3 h-0 basis-full sm:hidden" aria-hidden />
+                    <div className="order-4 inline-flex items-center gap-1 rounded-full bg-muted p-1 sm:order-2 sm:gap-2">
+                      <button onClick={() => setQty(i.id, i.qty - 1)} className="h-10 w-10 inline-flex items-center justify-center rounded-full hover:bg-background sm:h-8 sm:w-8" aria-label="Decrease">
                         <Minus className="h-3.5 w-3.5" />
                       </button>
-                      <span className="w-6 text-center text-sm font-medium">{i.qty}</span>
-                      <button onClick={() => setQty(i.id, i.qty + 1)} className="h-8 w-8 inline-flex items-center justify-center rounded-full hover:bg-background" aria-label="Increase">
+                      <span className="w-7 text-center text-sm font-semibold tabular-nums sm:w-6 sm:font-medium">{i.qty}</span>
+                      <button onClick={() => setQty(i.id, i.qty + 1)} className="h-10 w-10 inline-flex items-center justify-center rounded-full hover:bg-background sm:h-8 sm:w-8" aria-label="Increase">
                         <Plus className="h-3.5 w-3.5" />
                       </button>
                     </div>
-                    <div className="w-20 text-right font-medium">{inr(i.qty * i.price)}</div>
-                    <button onClick={() => remove(i.id)} className="h-9 w-9 inline-flex items-center justify-center rounded-full text-muted-foreground hover:bg-destructive/10 hover:text-destructive" aria-label="Remove">
+                    <button
+                      onClick={() => remove(i.id)}
+                      className="order-5 ml-auto inline-flex h-10 items-center justify-center gap-1.5 rounded-full px-3 text-xs text-muted-foreground hover:bg-destructive/10 hover:text-destructive sm:order-4 sm:ml-0 sm:h-9 sm:w-9 sm:px-0"
+                      aria-label="Remove"
+                    >
                       <Trash2 className="h-4 w-4" />
+                      <span className="sm:hidden">Remove</span>
                     </button>
                   </div>
                 ))
@@ -400,8 +418,8 @@ export default function CheckoutPage() {
             </div>
 
             {/* Summary + form */}
-            <form onSubmit={placeOrder} className="lg:col-span-2 space-y-6">
-              <div className="rounded-3xl border border-border bg-card p-6 shadow-soft">
+            <form id="checkout-form" onSubmit={placeOrder} className="min-w-0 space-y-4 sm:space-y-6 lg:col-span-2">
+              <div className="rounded-2xl border border-border bg-card p-4 shadow-soft sm:rounded-3xl sm:p-6">
                 <h2 className="font-serif text-2xl text-foreground">Your details</h2>
                 <div className="mt-4 space-y-3">
                   <Field label="Full name" value={form.name} onChange={(v) => setForm({ ...form, name: v })} placeholder="Anjali Nair" />
@@ -411,7 +429,7 @@ export default function CheckoutPage() {
                     <select
                       value={form.locationId}
                       onChange={(e) => setForm({ ...form, locationId: e.target.value })}
-                      className="w-full rounded-xl border border-input bg-background px-4 py-2.5 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-gold/60"
+                      className="w-full rounded-xl border border-input bg-background px-4 py-3 text-base text-foreground focus:outline-none focus:ring-2 focus:ring-gold/60 sm:py-2.5 sm:text-sm"
                     >
                       <option value="">Select your area…</option>
                       {locations.map((l) => (
@@ -430,13 +448,13 @@ export default function CheckoutPage() {
                     <>
                       <div>
                         <div className="text-xs text-muted-foreground mb-1">Delivery date</div>
-                        <div className="flex flex-wrap gap-2">
+                        <div className="grid grid-cols-3 gap-2 sm:flex sm:flex-wrap">
                           {days.map((d) => (
                             <button
                               key={d.date}
                               type="button"
                               onClick={() => setForm({ ...form, date: d.date, slotId: "" })}
-                              className={`rounded-xl border px-3 py-2 text-xs transition-colors ${
+                              className={`min-h-11 rounded-xl border px-2 py-2 text-xs leading-tight transition-colors sm:min-h-0 sm:px-3 ${
                                 form.date === d.date ? "border-forest bg-forest/5 text-foreground" : "border-border hover:border-forest/40 text-foreground/80"
                               }`}
                             >
@@ -448,13 +466,13 @@ export default function CheckoutPage() {
 
                       <div>
                         <div className="text-xs text-muted-foreground mb-1">Delivery time</div>
-                        <div className="flex flex-wrap gap-2">
+                        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
                           {(days.find((d) => d.date === form.date)?.slots ?? []).map((sl) => (
                             <button
                               key={sl.id}
                               type="button"
                               onClick={() => setForm({ ...form, slotId: sl.id })}
-                              className={`rounded-xl border px-3 py-2 text-xs transition-colors ${
+                              className={`min-h-11 rounded-xl border px-2 py-2 text-xs transition-colors sm:min-h-0 sm:px-3 ${
                                 form.slotId === sl.id ? "border-forest bg-forest/5 text-foreground" : "border-border hover:border-forest/40 text-foreground/80"
                               }`}
                             >
@@ -462,7 +480,7 @@ export default function CheckoutPage() {
                             </button>
                           ))}
                           {form.date && (days.find((d) => d.date === form.date)?.slots.length ?? 0) === 0 && (
-                            <p className="text-xs text-muted-foreground">No times left for this day.</p>
+                            <p className="col-span-2 text-xs text-muted-foreground">No times left for this day.</p>
                           )}
                         </div>
                       </div>
@@ -473,6 +491,15 @@ export default function CheckoutPage() {
                 {/* Coupon — immediately before payment (spec #13) */}
                 <div className="mt-5">
                   <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground mb-2">Coupon</div>
+                  {!applied && !couponOpen && (
+                    <button
+                      type="button"
+                      onClick={() => setCouponOpen(true)}
+                      className="inline-flex min-h-10 items-center gap-2 text-sm font-medium text-forest sm:hidden"
+                    >
+                      <TicketPercent className="h-4 w-4" /> Have a coupon code?
+                    </button>
+                  )}
                   {applied ? (
                     <div className="flex items-center justify-between gap-2 rounded-xl border border-forest/40 bg-forest/5 px-3 py-2.5 text-sm">
                       <span className="inline-flex items-center gap-2 text-forest">
@@ -484,18 +511,18 @@ export default function CheckoutPage() {
                       </button>
                     </div>
                   ) : (
-                    <div className="flex gap-2">
+                    <div className={`${couponOpen ? "flex" : "hidden"} gap-2 sm:flex`}>
                       <input
                         value={couponInput}
                         onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
                         placeholder="Coupon code"
-                        className="flex-1 rounded-xl border border-input bg-background px-4 py-2.5 text-sm font-mono uppercase placeholder:font-sans placeholder:normal-case placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-gold/60"
+                        className="min-w-0 flex-1 rounded-xl border border-input bg-background px-4 py-3 text-base font-mono uppercase placeholder:font-sans placeholder:normal-case placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-gold/60 sm:py-2.5 sm:text-sm"
                       />
                       <button
                         type="button"
                         onClick={applyCoupon}
                         disabled={couponBusy || !couponInput.trim()}
-                        className="rounded-xl border border-border px-4 py-2.5 text-sm font-medium hover:bg-muted disabled:opacity-50"
+                        className="min-h-11 rounded-xl border border-border px-4 py-2.5 text-sm font-medium hover:bg-muted disabled:opacity-50 sm:min-h-0"
                       >
                         {couponBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : "Apply"}
                       </button>
@@ -527,7 +554,7 @@ export default function CheckoutPage() {
                 </div>
               </div>
 
-              <div className="rounded-3xl border border-border bg-card p-6 shadow-soft">
+              <div className="rounded-2xl border border-border bg-card p-4 shadow-soft sm:rounded-3xl sm:p-6">
                 <h2 className="font-serif text-2xl text-foreground">Order summary</h2>
                 {slotsConfigured && form.date && form.slotId && (
                   <div className="mt-4 rounded-xl border border-border bg-background px-3 py-2.5 text-xs text-foreground">
@@ -551,19 +578,14 @@ export default function CheckoutPage() {
                   <Row label="Total" value={inr(total)} bold />
                 </dl>
 
+                {/* Phones use the sticky bar below instead. */}
                 <button
                   type="submit"
-                  disabled={items.length === 0 || busy || !store.accepting}
-                  className="mt-6 w-full inline-flex items-center justify-center gap-2 rounded-full bg-primary px-6 py-3.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed shadow-elegant"
+                  disabled={ctaDisabled}
+                  className="mt-6 hidden w-full items-center justify-center gap-2 rounded-full bg-primary px-6 py-3.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed shadow-elegant lg:inline-flex"
                 >
-                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : form.method === "cod" ? <Wallet className="h-4 w-4" /> : <CreditCard className="h-4 w-4" />}
-                  {!store.accepting
-                    ? "Ordering paused"
-                    : form.method === "cod"
-                      ? store.codConfirmAmount > 0
-                        ? `Pay ${inr(Math.min(store.codConfirmAmount, total))} to confirm`
-                        : `Place order · ${inr(total)}`
-                      : `Pay ${inr(total)}`}
+                  {ctaIcon}
+                  {ctaLabel}
                 </button>
                 <p className="mt-3 text-xs text-muted-foreground text-center">
                   Payments are processed securely by Razorpay. Your card details never touch our servers.
@@ -583,7 +605,31 @@ export default function CheckoutPage() {
         </div>
       </section>
       <Footer />
-      <WhatsAppFab />
+      {items.length > 0 && (
+        <>
+          {/* Keeps the end of the footer clear of the sticky bar. */}
+          <div className="h-24 bg-charcoal lg:hidden" aria-hidden />
+          <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-card/95 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-8px_24px_rgba(0,0,0,0.08)] backdrop-blur lg:hidden">
+            <div className="mx-auto flex max-w-6xl items-center gap-3">
+              <div className="min-w-0 leading-tight">
+                <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Total</div>
+                <div className="text-lg font-semibold tabular-nums text-foreground">{inr(total)}</div>
+                {!selectedLocation && !freeDelivery && <div className="text-[11px] text-muted-foreground">+ delivery</div>}
+              </div>
+              <button
+                type="submit"
+                form="checkout-form"
+                disabled={ctaDisabled}
+                className="ml-auto inline-flex min-h-12 flex-1 items-center justify-center gap-2 rounded-full bg-primary px-5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {ctaIcon}
+                <span className="truncate">{ctaLabel}</span>
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+      <WhatsAppFab mobile="hidden" />
     </main>
   );
 }
@@ -629,8 +675,9 @@ function Field({
   placeholder?: string;
   type?: string;
 }) {
+  // 16px text on phones: iOS Safari zooms the whole page into smaller inputs.
   const cls =
-    "w-full rounded-xl border border-input bg-background px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-gold/60";
+    "w-full rounded-xl border border-input bg-background px-4 py-3 text-base text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-gold/60 sm:py-2.5 sm:text-sm";
   return (
     <label className="block">
       <div className="text-xs text-muted-foreground mb-1">{label}</div>
@@ -643,7 +690,7 @@ function Row({ label, value, bold, green }: { label: string; value: string; bold
   return (
     <div className="flex items-center justify-between">
       <dt className={bold ? "font-serif text-lg text-foreground" : green ? "text-forest" : "text-muted-foreground"}>{label}</dt>
-      <dd className={bold ? "font-serif text-lg text-foreground" : green ? "text-forest" : "text-foreground"}>{value}</dd>
+      <dd className={bold ? "text-lg font-semibold tabular-nums text-foreground" : green ? "tabular-nums text-forest" : "tabular-nums text-foreground"}>{value}</dd>
     </div>
   );
 }

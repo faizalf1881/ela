@@ -112,6 +112,9 @@
   }
   html {
     scroll-behavior: smooth;
+    /* The site header is fixed: anchor jumps (#menu) and fields the browser
+       scrolls into view must land below it, not underneath it. */
+    scroll-padding-top: 6rem;
   }
   body {
     background-color: var(--color-background);

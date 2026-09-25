@@ -7,7 +7,6 @@ import { X, Minus, Plus, Trash2, ShoppingBag, ArrowRight, Tag } from "lucide-rea
 import { useCart } from "@/lib/cart";
 import { inr } from "@/lib/utils";
 
-const DELIVERY_FEE = 40;
 
 export function CartSheet() {
   const router = useRouter();
@@ -25,7 +24,6 @@ export function CartSheet() {
     };
   }, [isOpen, closeCart]);
 
-  const total = subtotal + (subtotal > 0 ? DELIVERY_FEE : 0);
 
   const goCheckout = () => {
     closeCart();
@@ -81,22 +79,23 @@ export function CartSheet() {
                     <Image src={i.imageUrl || "/menu/traditional.jpg"} alt={i.name} fill sizes="56px" className="object-cover" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate font-medium text-foreground">{i.name}</div>
-                    <div className="text-xs text-muted-foreground">
+                    <div className="line-clamp-2 font-medium leading-snug text-foreground">{i.name}</div>
+                    <div className="mt-0.5 text-xs text-muted-foreground tabular-nums">
                       {inr(i.price)}
                       {i.mrp && i.mrp > i.price && <span className="ml-1 line-through">{inr(i.mrp)}</span>}
+                      {i.qty > 1 && <span className="ml-1.5 font-semibold text-foreground">= {inr(i.price * i.qty)}</span>}
                     </div>
                   </div>
-                  <div className="inline-flex items-center gap-1.5 rounded-full bg-primary p-1 text-primary-foreground">
-                    <button onClick={() => setQty(i.id, i.qty - 1)} className="h-6 w-6 inline-flex items-center justify-center rounded-full hover:bg-white/15" aria-label="Decrease">
-                      <Minus className="h-3 w-3" />
+                  <div className="inline-flex shrink-0 items-center gap-1 rounded-full bg-primary p-1 text-primary-foreground">
+                    <button onClick={() => setQty(i.id, i.qty - 1)} className="h-10 w-10 inline-flex items-center justify-center rounded-full hover:bg-white/15" aria-label="Decrease">
+                      <Minus className="h-3.5 w-3.5" />
                     </button>
-                    <span className="w-4 text-center text-xs font-semibold tabular-nums">{i.qty}</span>
-                    <button onClick={() => setQty(i.id, i.qty + 1)} className="h-6 w-6 inline-flex items-center justify-center rounded-full hover:bg-white/15" aria-label="Increase">
-                      <Plus className="h-3 w-3" />
+                    <span className="w-5 text-center text-sm font-semibold tabular-nums">{i.qty}</span>
+                    <button onClick={() => setQty(i.id, i.qty + 1)} className="h-10 w-10 inline-flex items-center justify-center rounded-full hover:bg-white/15" aria-label="Increase">
+                      <Plus className="h-3.5 w-3.5" />
                     </button>
                   </div>
-                  <button onClick={() => remove(i.id)} className="h-8 w-8 shrink-0 inline-flex items-center justify-center rounded-full text-muted-foreground hover:bg-destructive/10 hover:text-destructive" aria-label="Remove">
+                  <button onClick={() => remove(i.id)} className="h-10 w-10 shrink-0 inline-flex items-center justify-center rounded-full text-muted-foreground hover:bg-destructive/10 hover:text-destructive" aria-label="Remove">
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
@@ -109,19 +108,14 @@ export function CartSheet() {
                   <Tag className="h-4 w-4" /> You&apos;re saving {inr(savings)} on this order
                 </div>
               )}
-              <div className="space-y-1.5 text-sm">
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Subtotal</span>
-                  <span>{inr(subtotal)}</span>
+              {/* Delivery depends on the area (and is free for members), so it is
+                  added at checkout rather than guessed here. */}
+              <div className="space-y-1 text-sm">
+                <div className="flex items-baseline justify-between text-foreground">
+                  <span className="font-serif text-lg">Subtotal</span>
+                  <span className="text-lg font-semibold tabular-nums">{inr(subtotal)}</span>
                 </div>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>Delivery</span>
-                  <span>{inr(DELIVERY_FEE)}</span>
-                </div>
-                <div className="flex justify-between pt-1 font-serif text-lg text-foreground">
-                  <span>Total</span>
-                  <span>{inr(total)}</span>
-                </div>
+                <p className="text-xs text-muted-foreground">Delivery charge for your area is added at checkout.</p>
               </div>
               <button
                 onClick={goCheckout}
