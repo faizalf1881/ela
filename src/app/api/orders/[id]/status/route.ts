@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
-import { notifyOrderStatus } from "@/lib/notify";
-import { audit, actorFrom } from "@/lib/audit";
+import { actorFrom } from "@/lib/audit";
+import { changeOrderStatus, StatusChangeError } from "@/lib/order-flow";
 
 export const runtime = "nodejs";
 
@@ -23,23 +22,17 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     return NextResponse.json({ error: "Invalid status" }, { status: 400 });
   }
 
-  const before = await prisma.order.findUnique({ where: { id } });
-  if (!before) return NextResponse.json({ error: "Order not found" }, { status: 404 });
-
-  const order = await prisma.order.update({
-    where: { id },
-    data: { status: parsed.data.status },
-    include: { items: true },
-  });
-  await audit({
-    actor: actorFrom(s),
-    action: "order.status_changed",
-    entityType: "order",
-    entityId: id,
-    summary: `Order #${id.slice(-6).toUpperCase()}: ${before.status} → ${order.status}`,
-    metadata: { from: before.status, to: order.status },
-    req,
-  });
-  await notifyOrderStatus(order); // WhatsApp the customer their new status
-  return NextResponse.json({ order });
+  try {
+    const { order, changed, from } = await changeOrderStatus({
+      orderId: id,
+      to: parsed.data.status,
+      actor: actorFrom(s),
+      via: "board",
+      req,
+    });
+    return NextResponse.json({ order, changed, from });
+  } catch (e) {
+    if (e instanceof StatusChangeError) return NextResponse.json({ error: e.message }, { status: e.httpStatus });
+    throw e;
+  }
 }

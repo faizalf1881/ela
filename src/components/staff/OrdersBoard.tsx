@@ -21,11 +21,13 @@ import {
   Repeat,
   CalendarClock,
   Download,
+  XCircle,
+  Info,
 } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
 import { ExportMenu } from "@/components/staff/ExportMenu";
-import { CameraScanner } from "@/components/staff/CameraScanner";
+import { CameraScanner, type ScanFeedback } from "@/components/staff/CameraScanner";
 import {
   KITCHEN_STATUSES,
   STATUS_BADGE,
@@ -38,7 +40,7 @@ const FILTERS: { key: string; label: string; match: (o: OrderDTO) => boolean }[]
   { key: "active", label: "Active", match: (o) => !["DELIVERED", "CANCELLED", "PENDING"].includes(o.status) },
   { key: "PLACED", label: "New", match: (o) => o.status === "PLACED" },
   { key: "PREPARING", label: "Preparing", match: (o) => o.status === "PREPARING" },
-  { key: "OUT_FOR_DELIVERY", label: "On the way", match: (o) => o.status === "OUT_FOR_DELIVERY" },
+  { key: "OUT_FOR_DELIVERY", label: "Out for delivery", match: (o) => o.status === "OUT_FOR_DELIVERY" },
   { key: "DELIVERED", label: "Delivered", match: (o) => o.status === "DELIVERED" },
   { key: "subscription", label: "Subscription", match: (o) => o.source === "subscription" },
   { key: "all", label: "All", match: () => true },
@@ -66,22 +68,26 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
   const [scan, setScan] = useState("");
   const [scanned, setScanned] = useState<string | null>(null); // highlighted order id
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [scanBanner, setScanBanner] = useState<(ScanFeedback & { key: number }) | null>(null);
+  const bannerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const seenRef = useRef<Set<string> | null>(null);
   const mutedRef = useRef(false);
   mutedRef.current = muted;
   const audioRef = useRef<AudioContext | null>(null);
 
-  const beep = useCallback(() => {
+  /** Short synthesized tones: [frequency Hz, start s][] with a wave shape. */
+  const tone = useCallback((notes: [number, number][], type: OscillatorType = "sine") => {
     if (mutedRef.current) return;
     try {
       const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       audioRef.current = audioRef.current || new Ctx();
       const ctx = audioRef.current;
-      const play = (freq: number, start: number) => {
+      void ctx.resume?.();
+      for (const [freq, start] of notes) {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
-        osc.type = "sine";
+        osc.type = type;
         osc.frequency.value = freq;
         gain.gain.setValueAtTime(0.0001, ctx.currentTime + start);
         gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + start + 0.02);
@@ -89,11 +95,10 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
         osc.connect(gain).connect(ctx.destination);
         osc.start(ctx.currentTime + start);
         osc.stop(ctx.currentTime + start + 0.26);
-      };
-      play(880, 0);
-      play(1174, 0.18);
+      }
     } catch {}
   }, []);
+  const beep = useCallback(() => tone([[880, 0], [1174, 0.18]]), [tone]);
 
   const load = useCallback(async () => {
     try {
@@ -139,38 +144,59 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status }),
       });
-      if (!res.ok) throw new Error();
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Could not update status");
       toast.success(`Order → ${STATUS_LABEL[status]}`);
-    } catch {
-      toast.error("Could not update status");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not update status");
       load();
     } finally {
       setSaving(null);
     }
   }
 
-  /** Look an order up from a scanned/typed code and jump to it on the board. */
-  async function lookupCode(raw: string) {
+  function showBanner(fb: ScanFeedback) {
+    if (bannerTimer.current) clearTimeout(bannerTimer.current);
+    setScanBanner({ ...fb, key: Date.now() });
+    bannerTimer.current = setTimeout(() => setScanBanner(null), 4500);
+  }
+
+  /**
+   * A scanned label moves its order to the next workflow step (spec #38): the
+   * server decides the step, refuses invalid moves, and ignores a double read.
+   */
+  async function scanAdvance(raw: string, opts: { banner: boolean }): Promise<ScanFeedback> {
     const code = raw.trim();
-    if (!code) return;
+    let fb: ScanFeedback;
     try {
       const res = await fetch("/api/orders/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code }),
+        body: JSON.stringify({ code, advance: true }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Not found");
-      await load();
-      setFilter("all");
-      setScanned(data.order.id);
-      toast.success(`Order #${data.order.id.slice(-6).toUpperCase()} — ${data.order.customerName}`);
-      setTimeout(() => {
-        document.getElementById(`order-${data.order.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
-      }, 50);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "No order matches that code");
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        const o: OrderDTO = data.order;
+        setOrders((prev) => prev.map((x) => (x.id === o.id ? { ...x, status: o.status } : x)));
+        setScanned(o.id);
+        fb = { tone: "success", title: `#${o.id.slice(-6).toUpperCase()} → ${STATUS_LABEL[data.to as OrderStatus]}`, detail: o.customerName };
+        tone([[988, 0], [1319, 0.12]]);
+      } else if (data.duplicate) {
+        fb = { tone: "info", title: "Already scanned", detail: data.error };
+      } else {
+        fb = { tone: "error", title: res.status === 404 ? "Unknown code" : "Can't move this order", detail: data.error || "Scan failed" };
+        tone([[220, 0], [196, 0.2]], "square");
+      }
+      const id = data.order?.id as string | undefined;
+      if (id) {
+        setTimeout(() => document.getElementById(`order-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
+      }
+    } catch {
+      fb = { tone: "error", title: "Scan failed", detail: "Check the connection and try again." };
+      tone([[220, 0], [196, 0.2]], "square");
     }
+    if (opts.banner) showBanner(fb);
+    void load();
+    return fb;
   }
 
   /** Hardware scanners type the code then press Enter. */
@@ -178,7 +204,7 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
     e.preventDefault();
     const code = scan.trim();
     setScan("");
-    await lookupCode(code);
+    if (code) await scanAdvance(code, { banner: true });
   }
 
   const visible = useMemo(() => {
@@ -247,14 +273,14 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
                 onChange={(e) => setScan(e.target.value)}
                 placeholder="Scan label QR…"
                 className="w-44 rounded-full border border-input bg-background pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gold/60"
-                title="Scan a delivery-label QR code (or type an order/invoice number) and press Enter"
+                title="Scan a delivery-label QR (or type an order/invoice number and press Enter) to move the order to its next step"
               />
             </label>
           </form>
           <button
             onClick={() => setCameraOpen(true)}
             className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-border hover:bg-muted"
-            title="Scan a label with the device camera"
+            title="Scan labels with the device camera: each scan moves the order to its next step"
             aria-label="Scan with camera"
           >
             <Camera className="h-4 w-4" />
@@ -427,7 +453,33 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
       </div>
 
       {cameraOpen && (
-        <CameraScanner onCode={(code) => lookupCode(code)} onClose={() => setCameraOpen(false)} />
+        <CameraScanner continuous onCode={(code) => scanAdvance(code, { banner: false })} onClose={() => setCameraOpen(false)} />
+      )}
+
+      {scanBanner && (
+        <div
+          key={scanBanner.key}
+          role="status"
+          aria-live="assertive"
+          className={`fixed left-1/2 top-20 z-[70] w-[min(92vw,34rem)] -translate-x-1/2 rounded-2xl px-5 py-4 text-white shadow-elegant ${
+            scanBanner.tone === "success" ? "bg-green-700" : scanBanner.tone === "info" ? "bg-amber-600" : "bg-red-700"
+          }`}
+          onClick={() => setScanBanner(null)}
+        >
+          <div className="flex items-center gap-3">
+            {scanBanner.tone === "success" ? (
+              <CheckCircle2 className="h-8 w-8 shrink-0" />
+            ) : scanBanner.tone === "info" ? (
+              <Info className="h-8 w-8 shrink-0" />
+            ) : (
+              <XCircle className="h-8 w-8 shrink-0" />
+            )}
+            <div className="min-w-0">
+              <div className="text-lg font-semibold leading-tight">{scanBanner.title}</div>
+              {scanBanner.detail && <div className="text-sm text-white/90">{scanBanner.detail}</div>}
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

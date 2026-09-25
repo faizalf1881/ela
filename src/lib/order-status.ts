@@ -10,7 +10,7 @@ export const STATUS_LABEL: Record<OrderStatus, string> = {
   PENDING: "Awaiting payment",
   PLACED: "Order confirmed",
   PREPARING: "Preparing",
-  OUT_FOR_DELIVERY: "On the way",
+  OUT_FOR_DELIVERY: "Out for delivery",
   DELIVERED: "Delivered",
   CANCELLED: "Cancelled",
 };

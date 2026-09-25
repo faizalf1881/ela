@@ -101,6 +101,20 @@ async function activateMealPlanForTest(customerId: string, planId: string, locat
   }
 }
 
+/**
+ * A scan within a few seconds of the last status change is treated as a double
+ * read. Tests step through the workflow faster than a kitchen would, so they age
+ * the last change instead of sleeping.
+ */
+async function ageStatusChange(orderId: string) {
+  const prisma = new PrismaClient();
+  try {
+    await prisma.order.update({ where: { id: orderId }, data: { statusChangedAt: new Date(Date.now() - 60_000) } });
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
 function section(t: string) {
   console.log(`\n▸ ${t}`);
 }
@@ -361,7 +375,7 @@ async function main() {
   // ---------- Kitchen status flow ----------
   section("Kitchen updates status");
   const st1 = await kitchen.fetch(`/api/orders/${dbOrderId}/status`, { method: "PATCH", body: JSON.stringify({ status: "OUT_FOR_DELIVERY" }) });
-  ok(st1.status === 200, "kitchen → On the way (200)");
+  ok(st1.status === 200, "kitchen → Out for delivery (200)");
   const st2 = await kitchen.fetch(`/api/orders/${dbOrderId}/status`, { method: "PATCH", body: JSON.stringify({ status: "DELIVERED" }) });
   ok((await st2.json()).order?.status === "DELIVERED", "kitchen → Delivered");
   const custStatus = await customer.fetch(`/api/orders/${dbOrderId}/status`, { method: "PATCH", body: JSON.stringify({ status: "PLACED" }) });
@@ -485,6 +499,87 @@ async function main() {
     !/Order confirmed|Preparing|On the way|Out for delivery|Delivered|Cancelled|Awaiting payment|Status/.test(labelHtml),
     "label shows no order status",
   );
+
+  // ---------- QR scan moves the order to its next step (#38) ----------
+  section("QR scan advances the order");
+  const scanAdv = (code: string, c: Client = kitchen) =>
+    c.fetch("/api/orders/scan", { method: "POST", body: JSON.stringify({ code, advance: true }) });
+  const scanOrderId: string = cod.order.id;
+
+  const adv1 = await scanAdv(scanOrderId);
+  const a1 = await adv1.json();
+  ok(adv1.status === 200 && a1.from === "PLACED" && a1.to === "PREPARING", "scan moves Confirmed → Preparing");
+  ok(typeof a1.message === "string" && a1.message.includes("Preparing"), `scan returns a confirmation ("${a1.message}")`);
+
+  const dup = await scanAdv(scanOrderId);
+  const dupJ = await dup.json();
+  ok(dup.status === 409 && dupJ.duplicate === true, "immediate re-read of the same label is ignored");
+  const afterDup = await (await admin.fetch(`/api/orders/${scanOrderId}`)).json();
+  ok(afterDup.order?.status === "PREPARING", "the double read did not skip a step");
+
+  await ageStatusChange(scanOrderId);
+  const adv2 = await (await scanAdv(scanOrderId.slice(-6))).json();
+  ok(adv2.to === "OUT_FOR_DELIVERY", "next scan (short code) → Out for delivery");
+  await ageStatusChange(scanOrderId);
+  const adv3 = await (await scanAdv(cod.order.invoiceNo)).json();
+  ok(adv3.to === "DELIVERED", "next scan (invoice number) → Delivered");
+  await ageStatusChange(scanOrderId);
+  const adv4 = await scanAdv(scanOrderId);
+  const a4 = await adv4.json();
+  ok(adv4.status === 409 && a4.final === true && /final/i.test(a4.error), "Delivered is final — further scans are refused");
+
+  const unknownScan = await scanAdv("zzzznotanorder");
+  ok(unknownScan.status === 404 && /No order/.test((await unknownScan.json()).error), "unknown QR → 404 with a clear message");
+  const custAdv = await scanAdv(scanOrderId, customer);
+  ok(custAdv.status === 403, "customers cannot advance orders → 403");
+
+  const scanAudit = await (await admin.fetch(`/api/admin/audit?action=order.status_changed&q=${scanOrderId}`)).json();
+  ok(scanAudit.logs.filter((l: { summary: string }) => /QR scan/.test(l.summary)).length === 3, "each scan step is in the audit trail");
+
+  // Workflow is configurable by the admin.
+  const kGet = await kitchen.fetch("/api/admin/settings");
+  ok(kGet.status === 200 && (await kGet.json()).scanSteps?.length === 4, "kitchen can read the scan workflow");
+  const kPatch = await kitchen.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ scanSteps: ["PLACED", "DELIVERED"] }) });
+  ok(kPatch.status === 403, "only admins can change the scan workflow → 403");
+  const custGet = await customer.fetch("/api/admin/settings");
+  ok(custGet.status === 403, "customers cannot read staff settings → 403");
+  const wf = await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ scanSteps: ["OUT_FOR_DELIVERY"] }) });
+  const wfJ = await wf.json();
+  ok(
+    wf.status === 200 && JSON.stringify(wfJ.scanSteps) === JSON.stringify(["PLACED", "OUT_FOR_DELIVERY", "DELIVERED"]),
+    "admin skips Preparing (Confirmed and Delivered are always kept)",
+  );
+
+  const cod2 = await (
+    await customer.fetch("/api/orders", {
+      method: "POST",
+      body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: "cod" }),
+    })
+  ).json();
+  const skip = await (await scanAdv(cod2.order.id)).json();
+  ok(skip.from === "PLACED" && skip.to === "OUT_FOR_DELIVERY", "configured workflow goes Confirmed → Out for delivery");
+  await admin.fetch("/api/admin/settings", {
+    method: "PATCH",
+    body: JSON.stringify({ scanSteps: ["PLACED", "PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"] }),
+  });
+
+  // Orders outside the fulfilment path can't be moved by a scan.
+  const cancelIt = await kitchen.fetch(`/api/orders/${cod2.order.id}/status`, { method: "PATCH", body: JSON.stringify({ status: "CANCELLED" }) });
+  ok(cancelIt.status === 200, "order cancelled from the board");
+  await ageStatusChange(cod2.order.id);
+  const scanCancelled = await scanAdv(cod2.order.id);
+  ok(scanCancelled.status === 409 && /cancelled/.test((await scanCancelled.json()).error), "cancelled order is not advanced");
+  const sameAgain = await (await kitchen.fetch(`/api/orders/${cod2.order.id}/status`, { method: "PATCH", body: JSON.stringify({ status: "CANCELLED" }) })).json();
+  ok(sameAgain.changed === false, "re-selecting the same status is a no-op (no duplicate customer message)");
+
+  const pend = await (
+    await customer.fetch("/api/orders", {
+      method: "POST",
+      body: JSON.stringify({ items: [{ id: menu[0].id, qty: 1 }], name: "E2E", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: "razorpay" }),
+    })
+  ).json();
+  const scanPending = await scanAdv(pend.order.id);
+  ok(scanPending.status === 409 && /payment/.test((await scanPending.json()).error), "unpaid order is not advanced");
 
   // ---------- Memberships / subscriptions ----------
   section("Memberships (plans + benefits)");
