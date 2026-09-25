@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { BrandLogo } from "./BrandLogo";
 import { Instagram, Facebook, Twitter, MessageCircle, Mail, MapPin, Phone } from "lucide-react";
 
 const WA = process.env.NEXT_PUBLIC_WHATSAPP_NUMBER || "917907577979";
@@ -10,8 +11,7 @@ export function Footer() {
         <div className="grid lg:grid-cols-12 gap-12">
           <div className="lg:col-span-5">
             <div className="flex items-center gap-3">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/ela-logo.jpeg" alt="Ela & Co." className="h-12 w-12 rounded-full ring-1 ring-gold/40 object-cover" />
+              <BrandLogo size={56} />
               <div>
                 <div className="font-serif text-2xl">Ela &amp; Co.</div>
                 <div className="text-[10px] uppercase tracking-[0.3em] text-gold">Flavours Wrapped in Tradition</div>

@@ -226,7 +226,7 @@ export default function CheckoutPage() {
         currency: data.razorpay.currency,
         name: "Ela & Co.",
         description: codConfirm ? `Order ${data.order.id} — COD confirmation` : `Order ${data.order.id}`,
-        image: "/ela-logo.jpeg",
+        image: `${window.location.origin}/brand/ela-logo.png`,
         order_id: data.razorpay.orderId,
         prefill: { name: form.name, contact: form.phone },
         notes: { location: selectedLocation?.name || "" },

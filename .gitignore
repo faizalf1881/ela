@@ -28,3 +28,6 @@ yarn-debug.log*
 yarn-error.log*
 .vscode/*
 !.vscode/extensions.json
+
+# TypeScript incremental build info
+*.tsbuildinfo

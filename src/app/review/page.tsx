@@ -4,6 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { ArrowLeft, Star, Loader2, CheckCircle2 } from "lucide-react";
+import { BrandLogo } from "@/components/site/BrandLogo";
 
 export default function ReviewCollectionPage() {
   const [name, setName] = useState("");
@@ -53,8 +54,7 @@ export default function ReviewCollectionPage() {
         ) : (
           <>
             <div className="flex flex-col items-center text-center">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/ela-logo.jpeg" alt="Ela & Co." className="h-14 w-14 rounded-full object-cover ring-1 ring-gold/40" />
+              <BrandLogo size={72} />
               <h1 className="mt-4 font-serif text-3xl text-foreground">Share your experience</h1>
               <p className="mt-1 text-sm text-muted-foreground">We&apos;d love to hear how your Ela &amp; Co. meal was.</p>
             </div>

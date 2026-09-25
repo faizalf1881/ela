@@ -4,7 +4,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { ArrowLeft, LogIn, Loader2, ShieldCheck } from "lucide-react";
+import { ArrowLeft, LogIn, Loader2 } from "lucide-react";
+import { BrandLogo } from "@/components/site/BrandLogo";
 import { useAuth } from "@/lib/auth-client";
 
 export default function StaffLoginPage() {
@@ -48,9 +49,7 @@ export default function StaffLoginPage() {
 
       <div className="w-full max-w-md rounded-3xl bg-card ring-1 ring-border shadow-elegant p-8">
         <div className="flex flex-col items-center text-center">
-          <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-forest/10 text-forest ring-1 ring-forest/15">
-            <ShieldCheck className="h-7 w-7" />
-          </div>
+          <BrandLogo size={72} priority />
           <h1 className="mt-4 font-serif text-3xl text-foreground">Staff Login</h1>
           <p className="mt-1 text-sm text-muted-foreground">Admin &amp; kitchen access</p>
         </div>

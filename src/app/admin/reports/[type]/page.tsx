@@ -32,7 +32,7 @@ export default async function ReportPage({ params }: { params: Promise<{ type: s
           <div className="flex items-start justify-between border-b-2 border-black/80 pb-4">
             <div className="flex items-center gap-3">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/ela-logo.jpeg" alt="Ela & Co." className="h-12 w-12 rounded-full object-cover" />
+              <img src="/brand/ela-logo.png" alt="Ela & Co." width={56} height={56} className="h-14 w-14 object-contain" />
               <div>
                 <div className="font-serif text-2xl">Ela &amp; Co.</div>
                 <div className="text-[10px] uppercase tracking-[0.2em] text-[#4B5A24]">Ela Cuisine · Thiruvananthapuram</div>

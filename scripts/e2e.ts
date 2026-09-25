@@ -175,6 +175,20 @@ async function main() {
   const discounted = menu.find((m) => m.discountPercent > 0);
   ok(!!discounted, "at least one discounted item exists");
 
+  // ---------- Branding ----------
+  section("Branding (new logo)");
+  const homeHtml = await (await new Client().fetch("/")).text();
+  ok(homeHtml.includes("brand%2Fela-logo.png") || homeHtml.includes("/brand/ela-logo.png"), "site header uses the new logo");
+  ok(!homeHtml.includes("ela-logo.jpeg"), "old logo is no longer referenced");
+  const oldLogo = await new Client().fetch("/ela-logo.jpeg");
+  ok(oldLogo.status === 404, "old logo file is retired");
+  const favicon = await new Client().fetch("/icon.png");
+  ok(favicon.status === 200 && (favicon.headers.get("content-type") || "").includes("image/png"), "favicon is the new emblem");
+  const manifest = await (await new Client().fetch("/manifest.webmanifest")).json();
+  ok(manifest.icons?.some((i: { src: string; purpose?: string }) => i.purpose === "maskable"), "install icon includes a maskable variant");
+  const staffLoginHtml = await (await new Client().fetch("/staff/login")).text();
+  ok(staffLoginHtml.includes("brand%2Fela-logo.png") || staffLoginHtml.includes("/brand/ela-logo.png"), "admin login shows the new logo");
+
   // ---------- Admin ----------
   section("Admin auth + guards");
   const admin = new Client();
@@ -460,6 +474,17 @@ async function main() {
   ok(scanBad.status === 404, "unknown scan code → 404");
   const scanCust = await customer.fetch("/api/orders/scan", { method: "POST", body: JSON.stringify({ code: dbOrderId }) });
   ok(scanCust.status === 403, "customers cannot scan → 403");
+
+  // Printed label: QR + order id + delivery essentials, but never a (soon stale) status.
+  const labelRes = await kitchen.fetch(`/orders/${dbOrderId}/label`);
+  const labelHtml = await labelRes.text();
+  ok(labelRes.status === 200 && labelHtml.includes("<svg"), "delivery label renders with its QR code");
+  ok(labelHtml.includes(dbOrderId.slice(-6).toUpperCase()), "label shows the order id");
+  ok(labelHtml.includes("/brand/ela-logo.png"), "label carries the new logo");
+  ok(
+    !/Order confirmed|Preparing|On the way|Out for delivery|Delivered|Cancelled|Awaiting payment|Status/.test(labelHtml),
+    "label shows no order status",
+  );
 
   // ---------- Memberships / subscriptions ----------
   section("Memberships (plans + benefits)");
@@ -832,6 +857,27 @@ async function main() {
   const mealSubId3 = await activateMealPlanForTest(crmMe.id, mealPlan.id, locationId, sched.deliverySlotId, today, null);
   ok(!!mealSubId3, "third meal subscription activated");
   await admin.fetch(`/api/plans/${mealPlan.id}`, { method: "PATCH", body: JSON.stringify({ serviceDays: allDays }) });
+
+  // Customer-side validation of meal-plan delivery details (runs before any billing).
+  const subscribeMeal = (extra: Record<string, unknown>) =>
+    customer.fetch("/api/subscriptions", { method: "POST", body: JSON.stringify({ planId: mealPlan.id, ...extra }) });
+  const noLoc = await subscribeMeal({});
+  ok(noLoc.status === 400 && /delivered/.test((await noLoc.json()).error), "meal plan without a delivery area → 400");
+  const badLoc = await subscribeMeal({ deliveryLocationId: "nope" });
+  ok(badLoc.status === 400, "meal plan with an unknown delivery area → 400");
+  const badMealSlot = await subscribeMeal({ deliveryLocationId: locationId, deliverySlotId: "nope" });
+  ok(badMealSlot.status === 400, "meal plan with an unknown delivery time → 400");
+  const pastStart = await subscribeMeal({ deliveryLocationId: locationId, startDate: "2020-01-01" });
+  ok(pastStart.status === 400, "meal plan starting in the past → 400");
+  const validMeal = await subscribeMeal({ deliveryLocationId: locationId, deliverySlotId: sched.deliverySlotId, startDate: tomorrow });
+  ok([409, 503].includes(validMeal.status), "valid meal details pass validation (then blocked only by the existing membership)");
+  await admin.fetch(`/api/plans/${planId}`, { method: "PATCH", body: JSON.stringify({ active: true }) });
+  const discountIgnoresLoc = await customer.fetch("/api/subscriptions", {
+    method: "POST",
+    body: JSON.stringify({ planId, deliveryLocationId: "nope" }),
+  });
+  ok([409, 503].includes(discountIgnoresLoc.status), "discount plans ignore delivery fields instead of rejecting them");
+  await admin.fetch(`/api/plans/${planId}`, { method: "PATCH", body: JSON.stringify({ active: false }) });
 
   const closedRun = await admin.fetch(`/api/cron/meal-plans?date=${dayAfter}`, { method: "POST" });
   const cr = await closedRun.json();

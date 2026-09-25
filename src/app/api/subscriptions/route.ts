@@ -58,8 +58,24 @@ export async function POST(req: Request) {
 
   const plan = await prisma.subscriptionPlan.findFirst({ where: { id: parsed.data.planId, active: true } });
   if (!plan) return NextResponse.json({ error: "That plan is not available." }, { status: 404 });
-  if (plan.kind === "MEAL" && !parsed.data.deliveryLocationId) {
-    return NextResponse.json({ error: "Please choose where your meals should be delivered." }, { status: 400 });
+  const isMeal = plan.kind === "MEAL";
+  if (isMeal) {
+    const { deliveryLocationId, deliverySlotId, startDate } = parsed.data;
+    if (!deliveryLocationId) {
+      return NextResponse.json({ error: "Please choose where your meals should be delivered." }, { status: 400 });
+    }
+    const location = await prisma.deliveryLocation.findFirst({ where: { id: deliveryLocationId, active: true } });
+    if (!location) return NextResponse.json({ error: "We don't deliver to that area any more. Please pick another." }, { status: 400 });
+    if (deliverySlotId) {
+      const slot = await prisma.deliverySlot.findFirst({ where: { id: deliverySlotId, active: true } });
+      if (!slot) return NextResponse.json({ error: "That delivery time is no longer offered. Please pick another." }, { status: 400 });
+    }
+    if (startDate) {
+      const today = istDateKey();
+      if (startDate < today || startDate > addDays(today, 60)) {
+        return NextResponse.json({ error: "Please choose a start date within the next two months." }, { status: 400 });
+      }
+    }
   }
   if (!plan.razorpayPlanId) {
     return NextResponse.json(
@@ -95,10 +111,11 @@ export async function POST(req: Request) {
         planId: plan.id,
         status: "CREATED",
         razorpaySubscriptionId: rp.id,
-        deliveryLocationId: parsed.data.deliveryLocationId ?? null,
-        deliverySlotId: parsed.data.deliverySlotId ?? null,
-        startDate: plan.kind === "MEAL" ? toDbDate(startKey) : null,
-        endDate: plan.kind === "MEAL" && endKey ? toDbDate(endKey) : null,
+        // Delivery preferences only mean something for meal plans.
+        deliveryLocationId: isMeal ? (parsed.data.deliveryLocationId ?? null) : null,
+        deliverySlotId: isMeal ? (parsed.data.deliverySlotId ?? null) : null,
+        startDate: isMeal ? toDbDate(startKey) : null,
+        endDate: isMeal && endKey ? toDbDate(endKey) : null,
       },
     });
 

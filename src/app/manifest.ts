@@ -9,6 +9,10 @@ export default function manifest(): MetadataRoute.Manifest {
     display: "standalone",
     background_color: "#F8F5EE",
     theme_color: "#4B5A24",
-    icons: [{ src: "/ela-logo.jpeg", sizes: "512x512", type: "image/jpeg" }],
+    icons: [
+      { src: "/brand/ela-logo-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+      { src: "/brand/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+      { src: "/brand/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+    ],
   };
 }

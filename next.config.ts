@@ -5,7 +5,9 @@ const securityHeaders = [
   { key: "X-Frame-Options", value: "SAMEORIGIN" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "X-DNS-Prefetch-Control", value: "on" },
-  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+  // camera=(self): the staff QR scanner needs the camera on our own pages;
+  // embedded third-party frames still get nothing.
+  { key: "Permissions-Policy", value: "camera=(self), microphone=(), geolocation=()" },
 ];
 
 const nextConfig: NextConfig = {

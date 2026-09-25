@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText, MapPin, TicketPercent, Wallet, Contact, Star, LifeBuoy, Crown, CalendarClock } from "lucide-react";
 import { useAuth, type Role } from "@/lib/auth-client";
+import { BrandLogo } from "@/components/site/BrandLogo";
 
 const ADMIN_NAV = [
   { href: "/admin", label: "Orders", icon: ClipboardList },
@@ -100,8 +101,7 @@ export function StaffShell({ allow, children }: { allow: Role[]; children: React
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="flex h-16 items-center justify-between gap-4">
             <div className="flex items-center gap-3">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/ela-logo.jpeg" alt="Ela & Co." className="h-9 w-9 rounded-full object-cover ring-1 ring-gold/40" />
+              <BrandLogo size={40} priority />
               <div className="leading-tight">
                 <div className="font-serif text-lg text-foreground">Ela &amp; Co.</div>
                 <div className="text-[10px] uppercase tracking-[0.24em] text-gold">

@@ -35,7 +35,7 @@ export default async function InvoicePage({ params }: { params: Promise<{ id: st
           <div className="flex items-start justify-between gap-6 border-b border-black/10 pb-6">
             <div className="flex items-center gap-3">
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src="/ela-logo.jpeg" alt="Ela & Co." className="h-14 w-14 rounded-full object-cover" />
+              <img src="/brand/ela-logo.png" alt="Ela & Co." width={64} height={64} className="h-16 w-16 object-contain" />
               <div>
                 <div className="font-serif text-2xl">Ela &amp; Co.</div>
                 <div className="text-xs uppercase tracking-[0.2em] text-[#4B5A24]">Ela Cuisine</div>

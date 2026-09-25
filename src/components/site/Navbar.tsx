@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ShoppingBag, Menu, X, User, LayoutDashboard, ChefHat, Crown } from "lucide-react";
 import { useCart } from "@/lib/cart";
+import { BrandLogo } from "./BrandLogo";
 import { useAuth } from "@/lib/auth-client";
 
 const links = [
@@ -47,8 +48,7 @@ export function Navbar() {
           }`}
         >
           <Link href="/" className="flex items-center gap-3">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/ela-logo.jpeg" alt="Ela & Co." className="h-10 w-10 rounded-full object-cover ring-1 ring-gold/40" />
+            <BrandLogo size={44} priority />
             <div className="leading-tight">
               <div className="font-serif text-lg text-foreground">Ela &amp; Co.</div>
               <div className="text-[10px] uppercase tracking-[0.28em] text-gold">Ela Cuisine</div>

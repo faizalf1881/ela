@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ArrowLeft, ArrowRight, MessageCircle, Loader2, UserPlus } from "lucide-react";
 import { useAuth } from "@/lib/auth-client";
+import { BrandLogo } from "@/components/site/BrandLogo";
 
 type Mode = "login" | "signup";
 
@@ -96,8 +97,7 @@ export default function CustomerLoginPage() {
 
       <div className="w-full max-w-md rounded-3xl bg-card ring-1 ring-border shadow-elegant p-8">
         <div className="flex flex-col items-center text-center">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/ela-logo.jpeg" alt="Ela & Co." className="h-14 w-14 rounded-full object-cover ring-1 ring-gold/40" />
+          <BrandLogo size={72} priority />
           <h1 className="mt-4 font-serif text-3xl text-foreground">
             {step === "otp" ? "Verify your number" : mode === "login" ? "Customer Login" : "Create your account"}
           </h1>

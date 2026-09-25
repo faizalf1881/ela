@@ -17,7 +17,6 @@ export const metadata: Metadata = {
   description:
     "Ela Cuisine by Ela & Co. — authentic Kerala homemade meals crafted from generations-old recipes, delivered fresh to your door.",
   applicationName: "Ela & Co.",
-  icons: { icon: "/ela-logo.jpeg", apple: "/ela-logo.jpeg" },
   openGraph: {
     title: "Ela & Co. — Authentic Kerala Meals",
     description: "Authentic Kerala meals, freshly prepared and delivered.",
