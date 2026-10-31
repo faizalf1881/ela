@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import { actorFrom } from "@/lib/audit";
+import { sendReadReceipt } from "@/lib/wa-chat";
 
 export const runtime = "nodejs";
 
@@ -15,5 +16,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const conv = await prisma.waConversation.findUnique({ where: { id } });
   if (!conv) return NextResponse.json({ error: "Not found" }, { status: 404 });
   const conversation = await prisma.waConversation.update({ where: { id }, data: { unreadCount: 0 } });
+  // The customer sees blue ticks once a person has actually opened the chat.
+  if (conv.unreadCount > 0) await sendReadReceipt(conv).catch(() => null);
   return NextResponse.json({ conversation });
 }

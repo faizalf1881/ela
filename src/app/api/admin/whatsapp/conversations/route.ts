@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
+import { audit, actorFrom } from "@/lib/audit";
+import { normalizePhone } from "@/lib/utils";
+import { prepareTemplate } from "@/lib/wa-templates";
+import { conversationFor, isTyping, sendChatTemplate } from "@/lib/wa-chat";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -50,5 +55,42 @@ export async function GET(req: Request) {
   ]);
   const counts = Object.fromEntries(grouped.map((g) => [g.state, g._count._all]));
 
-  return NextResponse.json({ conversations, counts: { ...counts, unread } });
+  return NextResponse.json({ conversations: conversations.map((c) => ({ ...c, typing: isTyping(c) })), counts: { ...counts, unread } });
+}
+
+const startSchema = z.object({
+  phone: z.string().trim().min(6).max(20),
+  templateId: z.string().min(1),
+  values: z.record(z.string(), z.string().max(1000)).default({}),
+});
+
+/**
+ * POST — start (or restart) a conversation with an approved template (spec
+ * #2). WhatsApp only lets a business message someone first with a template.
+ */
+export async function POST(req: Request) {
+  const s = await getSession();
+  if (!s) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  if (s.role !== "admin") return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const parsed = startSchema.safeParse(await req.json().catch(() => null));
+  if (!parsed.success) return NextResponse.json({ error: "Enter the WhatsApp number and choose a template." }, { status: 400 });
+  const phone = normalizePhone(parsed.data.phone);
+  if (!phone) return NextResponse.json({ error: "That doesn't look like a valid WhatsApp number." }, { status: 400 });
+
+  const prepared = await prepareTemplate(parsed.data.templateId, parsed.data.values);
+  if (!prepared.ok) return NextResponse.json({ error: prepared.error }, { status: 400 });
+  const conv = await conversationFor(phone);
+  const staff = actorFrom(s).label || "Admin";
+  const message = await sendChatTemplate(conv, prepared, staff);
+  await audit({
+    actor: actorFrom(s),
+    action: "whatsapp.template_sent",
+    entityType: "conversation",
+    entityId: conv.id,
+    summary: `${staff} started a WhatsApp chat with +${phone} using template ${prepared.template.name}${message.status === "failed" ? " (failed)" : ""}`,
+    metadata: { template: prepared.template.name, values: parsed.data.values, status: message.status },
+    req,
+  });
+  if (message.status === "failed") return NextResponse.json({ error: message.error || "WhatsApp did not accept the template.", conversation: conv, message }, { status: 502 });
+  return NextResponse.json({ conversation: conv, message }, { status: 201 });
 }

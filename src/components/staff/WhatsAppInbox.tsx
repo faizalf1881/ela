@@ -24,8 +24,15 @@ import {
   LifeBuoy,
   X,
   CircleAlert,
+  Zap,
+  MessageSquarePlus,
+  ExternalLink,
+  List,
+  Reply,
 } from "lucide-react";
 import { inr } from "@/lib/utils";
+import { TemplateBubble, TemplateDialog, type TemplateRow } from "@/components/staff/TemplatePicker";
+import type { TemplatePreview } from "@/lib/wa-template-utils";
 import { STATUS_BADGE, STATUS_LABEL, type OrderStatus } from "@/lib/order-status";
 
 type Mode = "AI" | "HUMAN";
@@ -45,7 +52,13 @@ type Conversation = {
   lastInboundAt: string | null;
   lastPreview: string | null;
   handledByLabel: string | null;
+  /** The assistant is composing a reply right now. */
+  typing?: boolean;
 };
+type Interactive =
+  | { kind: "buttons"; body: string; buttons: { id: string; title: string }[]; header?: string; footer?: string; imageUrl?: string }
+  | { kind: "list"; body: string; button: string; sections: { title?: string; rows: { id: string; title: string; description?: string }[] }[]; header?: string; footer?: string }
+  | { kind: "cta_url"; body: string; displayText: string; url: string; header?: string; footer?: string };
 type Message = {
   id: string;
   direction: "in" | "out";
@@ -56,6 +69,8 @@ type Message = {
   status: string | null;
   error: string | null;
   createdAt: string;
+  replyId?: string | null;
+  meta?: unknown;
 };
 type HandlingEvent = { id: string; fromMode: Mode | null; toMode: Mode; fromState: State | null; toState: State; actorType: string; actorLabel: string | null; reason: string | null; createdAt: string };
 type OrderUpdate = { id: string; orderId: string; toStatus: OrderStatus; body: string; createdAt: string; deliveryStatus: string | null };
@@ -128,8 +143,11 @@ export function WhatsAppInbox() {
   const [showContext, setShowContext] = useState(true);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [pendingPhone, setPendingPhone] = useState<string | null>(params.get("phone")?.replace(/\D/g, "") || null);
+  const [templateOpen, setTemplateOpen] = useState(false);
+  const [newChat, setNewChat] = useState<{ phone: string } | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const lastCountRef = useRef(0);
+  const typingSentRef = useRef(0);
 
   const loadList = useCallback(async () => {
     try {
@@ -180,7 +198,10 @@ export function WhatsAppInbox() {
     if (!pendingPhone || loadingList) return;
     const hit = list.find((c) => c.phone === pendingPhone || c.phone.endsWith(pendingPhone.slice(-10)));
     if (hit) setSelectedId(hit.id);
-    else toast.message("No WhatsApp messages from this customer yet", { description: "Their chat appears here as soon as they message you." });
+    else {
+      toast.message("No WhatsApp chat with this customer yet", { description: "Start one with an approved template." });
+      setNewChat({ phone: pendingPhone.length === 10 ? `91${pendingPhone}` : pendingPhone });
+    }
     setPendingPhone(null);
   }, [pendingPhone, list, loadingList]);
 
@@ -195,13 +216,55 @@ export function WhatsAppInbox() {
     return items.sort((a, b) => a.at.localeCompare(b.at));
   }, [detail]);
 
-  // Keep the newest message in view as the thread grows.
+  // Keep the newest message (and the typing bubble) in view as the thread grows.
+  const typingNow = !!detail?.conversation.typing && detail.conversation.mode === "AI";
   useEffect(() => {
-    if (timeline.length !== lastCountRef.current) {
-      lastCountRef.current = timeline.length;
+    if (timeline.length + (typingNow ? 1 : 0) !== lastCountRef.current) {
+      lastCountRef.current = timeline.length + (typingNow ? 1 : 0);
       endRef.current?.scrollIntoView({ block: "end" });
     }
-  }, [timeline.length]);
+  }, [timeline.length, typingNow]);
+
+  /** Tell the customer someone is typing (WhatsApp shows it for ~25s), at most every 20s. */
+  function pingTyping() {
+    if (!detail || Date.now() - typingSentRef.current < 20_000) return;
+    typingSentRef.current = Date.now();
+    void fetch(`/api/admin/whatsapp/conversations/${detail.conversation.id}/typing`, { method: "POST" });
+  }
+
+  async function sendTemplate(convId: string, t: TemplateRow, values: Record<string, string>) {
+    const res = await fetch(`/api/admin/whatsapp/conversations/${convId}/template`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ templateId: t.id, values }),
+    });
+    const d = await res.json();
+    if (!res.ok) {
+      toast.error(d.error || "Could not send the template");
+      return;
+    }
+    toast.success(`Template "${t.name}" sent`);
+    setTemplateOpen(false);
+    await Promise.all([loadDetail(convId), loadList()]);
+  }
+
+  async function startChat(phone: string, t: TemplateRow, values: Record<string, string>) {
+    const res = await fetch("/api/admin/whatsapp/conversations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone, templateId: t.id, values }),
+    });
+    const d = await res.json();
+    if (!res.ok) {
+      toast.error(d.error || "Could not start the chat");
+      if (d.conversation?.id) setSelectedId(d.conversation.id);
+      return;
+    }
+    toast.success("Template sent — the chat continues when they reply");
+    setNewChat(null);
+    await loadList();
+    setSelectedId(d.conversation.id);
+  }
 
   async function act(action: "takeover" | "handback" | "state", body?: unknown) {
     if (!detail) return;
@@ -256,9 +319,14 @@ export function WhatsAppInbox() {
           <h1 className="font-serif text-2xl text-foreground sm:text-3xl">WhatsApp chats</h1>
           <p className="mt-1 hidden text-sm text-muted-foreground sm:block">Customer conversations — answered by the AI until someone takes over.</p>
         </div>
-        <Link href="/admin/settings#ai" className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs hover:bg-muted">
-          <Sparkles className="h-3.5 w-3.5" /> AI settings
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={() => setNewChat({ phone: "" })} className="inline-flex items-center gap-1.5 rounded-full bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90">
+            <MessageSquarePlus className="h-3.5 w-3.5" /> New chat
+          </button>
+          <Link href="/admin/settings#ai" className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs hover:bg-muted">
+            <Sparkles className="h-3.5 w-3.5" /> AI settings
+          </Link>
+        </div>
       </div>
 
       <div className="grid h-[calc(100dvh-13rem)] min-h-[520px] overflow-hidden border-y border-border bg-card sm:rounded-2xl sm:border md:grid-cols-[18rem_1fr] xl:grid-cols-[20rem_1fr_auto]">
@@ -314,7 +382,11 @@ export function WhatsAppInbox() {
                         <span className="shrink-0 text-[11px] text-muted-foreground">{shortTime(c.lastMessageAt)}</span>
                       </span>
                       <span className="mt-0.5 flex items-center justify-between gap-2">
-                        <span className="truncate text-xs text-muted-foreground">{c.lastPreview || "—"}</span>
+                        {c.typing && c.mode === "AI" ? (
+                          <span className="truncate text-xs font-medium text-[#1fa855]">AI is typing…</span>
+                        ) : (
+                          <span className="truncate text-xs text-muted-foreground">{c.lastPreview || "—"}</span>
+                        )}
                         {c.unreadCount > 0 && (
                           <span className="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-[#25D366] px-1.5 text-[11px] font-bold text-white">{c.unreadCount}</span>
                         )}
@@ -437,6 +509,7 @@ export function WhatsAppInbox() {
                     <Bubble key={item.m.id} m={item.m} />
                   ),
                 )}
+                {typingNow && <TypingBubble />}
                 <div ref={endRef} />
               </div>
 
@@ -446,20 +519,43 @@ export function WhatsAppInbox() {
                     <span className="inline-flex items-center gap-1.5">
                       <Bot className="h-4 w-4" /> The AI is answering this customer.
                     </span>
-                    <button onClick={() => act("takeover")} disabled={busy !== null} className="rounded-full bg-primary px-3 py-1.5 font-semibold text-primary-foreground disabled:opacity-60">
-                      Take over to reply
-                    </button>
+                    <span className="flex flex-wrap gap-2">
+                      <button onClick={() => setTemplateOpen(true)} className="inline-flex items-center gap-1 rounded-full border border-violet-300 bg-card px-3 py-1.5 font-semibold text-foreground hover:bg-muted">
+                        <Zap className="h-3.5 w-3.5" /> Send template
+                      </button>
+                      <button onClick={() => act("takeover")} disabled={busy !== null} className="rounded-full bg-primary px-3 py-1.5 font-semibold text-primary-foreground disabled:opacity-60">
+                        Take over to reply
+                      </button>
+                    </span>
                   </div>
                 ) : !replyWindow.open ? (
-                  <div className="flex items-start gap-2 rounded-xl bg-muted px-3 py-2.5 text-xs text-muted-foreground">
-                    <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
-                    The customer&apos;s last message was over 24 hours ago, so WhatsApp won&apos;t deliver a normal reply. Ask them to message you, or call +{conv.phone}.
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-muted px-3 py-2.5 text-xs text-muted-foreground">
+                    <span className="flex items-start gap-2">
+                      <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                      {conv.lastInboundAt
+                        ? "The customer's last message was over 24 hours ago, so WhatsApp only delivers an approved template."
+                        : "They haven't messaged you yet, so WhatsApp only delivers an approved template."}
+                    </span>
+                    <button onClick={() => setTemplateOpen(true)} className="inline-flex items-center gap-1.5 rounded-full bg-[#25D366] px-3.5 py-1.5 font-semibold text-white hover:bg-[#1fb957]">
+                      <Zap className="h-3.5 w-3.5" /> Send a template
+                    </button>
                   </div>
                 ) : (
                   <div className="flex items-end gap-2">
+                    <button
+                      onClick={() => setTemplateOpen(true)}
+                      className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-border text-foreground hover:bg-muted"
+                      title="Quick reply: send an approved template"
+                      aria-label="Send an approved template"
+                    >
+                      <Zap className="h-4 w-4" />
+                    </button>
                     <textarea
                       value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
+                      onChange={(e) => {
+                        setDraft(e.target.value);
+                        if (e.target.value.trim()) pingTyping();
+                      }}
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && !e.shiftKey) {
                           e.preventDefault();
@@ -494,7 +590,97 @@ export function WhatsAppInbox() {
       </div>
 
       {conv && context && sheetOpen && <ContextSheet ctx={context} conv={conv} onClose={() => setSheetOpen(false)} />}
+
+      {conv && templateOpen && (
+        <TemplateDialog
+          title="Quick reply"
+          subtitle={`Send an approved template to ${name}. It is delivered even outside the 24-hour window.`}
+          prefill={{ name: (conv.customer?.name || conv.profileName || "").split(/\s+/)[0] }}
+          onSend={(t, v) => sendTemplate(conv.id, t, v)}
+          onClose={() => setTemplateOpen(false)}
+        />
+      )}
+      {newChat && <NewChatDialog initialPhone={newChat.phone} onStart={startChat} onClose={() => setNewChat(null)} />}
     </div>
+  );
+}
+
+/** Start a chat with any WhatsApp number — WhatsApp requires an approved template for the first message. */
+function NewChatDialog({ initialPhone, onStart, onClose }: { initialPhone: string; onStart: (phone: string, t: TemplateRow, v: Record<string, string>) => Promise<void>; onClose: () => void }) {
+  const [phone, setPhone] = useState(initialPhone);
+  const digits = phone.replace(/\D/g, "");
+  const valid = digits.length === 10 || (digits.length >= 11 && digits.length <= 15);
+  return (
+    <TemplateDialog
+      title="New WhatsApp chat"
+      subtitle="WhatsApp only lets you message someone first with an approved template."
+      canSend={valid}
+      before={
+        <label className="mb-4 block">
+          <span className="text-xs text-muted-foreground">Customer&apos;s WhatsApp number</span>
+          <input
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            inputMode="tel"
+            placeholder="e.g. 98765 43210"
+            className="mt-1 w-full rounded-xl border border-input bg-background px-3 py-2.5 text-base focus:outline-none focus:ring-2 focus:ring-gold/60 sm:text-sm"
+          />
+          {phone && !valid && <span className="mt-1 block text-xs text-destructive">Enter a 10-digit mobile number, or the full number with country code.</span>}
+        </label>
+      }
+      onSend={(t, v) => onStart(digits, t, v)}
+      onClose={onClose}
+    />
+  );
+}
+
+/** WhatsApp's three-dot "typing…" while the assistant composes a reply. */
+function TypingBubble() {
+  return (
+    <div className="flex justify-end" aria-live="polite">
+      <div className="inline-flex items-center gap-2 rounded-2xl rounded-tr-sm bg-violet-100 px-3 py-2 text-[11px] text-violet-700 shadow-soft">
+        <Bot className="h-3.5 w-3.5" />
+        <span className="inline-flex items-center gap-1" aria-label="AI is typing">
+          {[0, 1, 2].map((i) => (
+            <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-violet-500" style={{ animationDelay: `${i * 0.15}s`, animationDuration: "0.9s" }} />
+          ))}
+        </span>
+        AI is typing…
+      </div>
+    </div>
+  );
+}
+
+/** Buttons, list rows or a link button under an interactive message — as the customer saw them. */
+function InteractiveParts({ meta }: { meta: Interactive }) {
+  if (meta.kind === "buttons")
+    return (
+      <div className="mt-1.5 flex flex-wrap gap-1">
+        {meta.buttons.map((b) => (
+          <span key={b.id} className="rounded-full border border-[#128C7E]/30 bg-white/70 px-2.5 py-0.5 text-[11px] font-medium text-[#128C7E]">
+            {b.title}
+          </span>
+        ))}
+      </div>
+    );
+  if (meta.kind === "list")
+    return (
+      <div className="mt-1.5 rounded-lg bg-white/60 p-1.5 text-[11px]">
+        <div className="mb-1 inline-flex items-center gap-1 font-medium text-[#128C7E]">
+          <List className="h-3 w-3" /> {meta.button}
+        </div>
+        {meta.sections.flatMap((sec) => sec.rows).map((r) => (
+          <div key={r.id} className="truncate text-foreground/80">
+            · {r.title}
+            {r.description ? <span className="text-muted-foreground"> — {r.description}</span> : null}
+          </div>
+        ))}
+      </div>
+    );
+  return (
+    <a href={meta.url} target="_blank" rel="noreferrer" className="mt-1.5 inline-flex items-center gap-1 rounded-full bg-white/70 px-2.5 py-1 text-[11px] font-medium text-[#128C7E] hover:underline">
+      <ExternalLink className="h-3 w-3" /> {meta.displayText}
+    </a>
   );
 }
 
@@ -514,8 +700,30 @@ function Bubble({ m }: { m: Message }) {
             {ai ? "AI" : m.staffLabel || "Staff"}
           </div>
         )}
-        {!mine && <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Customer</div>}
-        <div className="whitespace-pre-wrap break-words">{m.body}</div>
+        {!mine && (
+          <div className="mb-0.5 inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+            {m.replyId ? (
+              <>
+                <Reply className="h-3 w-3" /> Customer tapped
+              </>
+            ) : (
+              "Customer"
+            )}
+          </div>
+        )}
+        {m.type === "template" && (m.meta as { preview?: TemplatePreview } | null)?.preview ? (
+          <>
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">Template · {(m.meta as { template?: string }).template}</div>
+            <TemplateBubble preview={(m.meta as { preview: TemplatePreview }).preview} className="!max-w-none !rounded-xl !bg-white/50 !shadow-none" />
+          </>
+        ) : m.type === "interactive" && (m.meta as Interactive | null)?.kind ? (
+          <>
+            <div className="whitespace-pre-wrap break-words">{(m.meta as Interactive).body}</div>
+            <InteractiveParts meta={m.meta as Interactive} />
+          </>
+        ) : (
+          <div className="whitespace-pre-wrap break-words">{m.body}</div>
+        )}
         <div className="mt-1 flex items-center justify-end gap-1 text-[10px] text-muted-foreground">
           {ist(m.createdAt, { hour: "numeric", minute: "2-digit" })}
           {mine &&

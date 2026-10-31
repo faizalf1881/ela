@@ -1,8 +1,9 @@
 import "server-only";
-import type { ChatMode, ChatState, WaConversation } from "@prisma/client";
+import type { ChatMode, ChatState, Prisma, WaConversation } from "@prisma/client";
 import { prisma } from "./db";
 import { audit } from "./audit";
-import { sendWhatsApp, whatsappConfigured } from "./whatsapp";
+import { interactiveText, markRead, sendWhatsApp, whatsappConfigured, type Interactive, type OutgoingMessage } from "./whatsapp";
+import type { TemplatePreview } from "./wa-template-utils";
 import { explainWhatsAppError } from "./order-notify";
 import { resolveProvider } from "./ai/config";
 import { askAssistant, buildPrompt, customerContext } from "./ai/assistant";
@@ -23,6 +24,9 @@ const DEBOUNCE_MS = Number(process.env.AI_REPLY_DELAY_MS ?? 2500);
 /** Per conversation, per hour — beyond this a person should look. */
 const MAX_AI_REPLIES_PER_HOUR = 20;
 export const REPLY_WINDOW_MS = 24 * 60 * 60_000;
+
+/** The assistant is working on a reply right now (cleared when it answers; ignored after a minute). */
+export const isTyping = (c: { aiTypingAt: Date | null }) => !!c.aiTypingAt && Date.now() - c.aiTypingAt.getTime() < 60_000;
 
 type Actor = { type: "staff" | "ai" | "system"; label?: string | null };
 
@@ -71,8 +75,8 @@ type Inbound = {
   video?: { caption?: string };
   document?: { caption?: string; filename?: string };
   location?: { latitude?: number; longitude?: number; name?: string; address?: string };
-  button?: { text?: string };
-  interactive?: { button_reply?: { title?: string }; list_reply?: { title?: string } };
+  button?: { text?: string; payload?: string };
+  interactive?: { button_reply?: { id?: string; title?: string }; list_reply?: { id?: string; title?: string; description?: string } };
   reaction?: { emoji?: string };
 };
 
@@ -125,7 +129,17 @@ export async function recordInbound(m: Inbound, profileName?: string | null) {
   let message;
   try {
     message = await prisma.waMessage.create({
-      data: { conversationId: conv.id, direction: "in", sender: "CUSTOMER", type: m.type || "text", body, waMessageId: m.id, createdAt: receivedAt },
+      data: {
+        conversationId: conv.id,
+        direction: "in",
+        sender: "CUSTOMER",
+        type: m.type || "text",
+        body,
+        // Which button / list row was tapped — the ordering flow acts on it.
+        replyId: m.interactive?.button_reply?.id || m.interactive?.list_reply?.id || m.button?.payload || null,
+        waMessageId: m.id,
+        createdAt: receivedAt,
+      },
     });
   } catch {
     return null; // the same message arrived twice at once — the other copy wins
@@ -143,25 +157,104 @@ export async function recordInbound(m: Inbound, profileName?: string | null) {
   return { conversationId: conv.id, messageId: message.id, mode: conv.mode };
 }
 
-/** Sends a reply from the AI or a staff member and records it in the thread. */
-export async function sendChatMessage(conv: WaConversation, body: string, sender: "AI" | "STAFF", staffLabel?: string | null) {
+type OutboundRecord = {
+  sender: "AI" | "STAFF";
+  staffLabel?: string | null;
+  type: string;
+  body: string;
+  meta?: Prisma.InputJsonValue;
+};
+
+/** Records one outgoing message in the thread, sends it, and stores the outcome. */
+async function deliver(conv: WaConversation, rec: OutboundRecord, outgoing: OutgoingMessage) {
   const msg = await prisma.waMessage.create({
-    data: { conversationId: conv.id, direction: "out", sender, staffLabel: staffLabel ?? null, body, status: "sending" },
+    data: { conversationId: conv.id, direction: "out", sender: rec.sender, staffLabel: rec.staffLabel ?? null, type: rec.type, body: rec.body, meta: rec.meta, status: "sending" },
   });
   let update: { status: string; waMessageId?: string | null; error?: string | null };
   if (!whatsappConfigured()) {
     // eslint-disable-next-line no-console
-    console.log(`\n💬  [Ela WA chat → ${conv.phone}]  ${body}\n`);
+    console.log(`\n💬  [Ela WA chat → ${conv.phone}]  ${rec.body}\n`);
     update = { status: "failed", error: "WhatsApp is not configured on this server." };
   } else {
-    const r = await sendWhatsApp(conv.phone, { type: "text", body });
+    const r = await sendWhatsApp(conv.phone, outgoing);
     update = r.ok ? { status: "sent", waMessageId: r.messageId ?? null, error: null } : { status: "failed", error: explainWhatsAppError(r) };
   }
   const [saved] = await prisma.$transaction([
     prisma.waMessage.update({ where: { id: msg.id }, data: update }),
-    prisma.waConversation.update({ where: { id: conv.id }, data: { lastMessageAt: new Date(), lastPreview: body.slice(0, 140) } }),
+    prisma.waConversation.update({
+      where: { id: conv.id },
+      // A reply ends the assistant's "typing…".
+      data: { lastMessageAt: new Date(), lastPreview: rec.body.slice(0, 140), ...(rec.sender === "AI" ? { aiTypingAt: null } : {}) },
+    }),
   ]);
   return saved;
+}
+
+/** Sends a reply from the AI or a staff member — text, or buttons / a list / a link button — and records it. */
+export async function sendChatMessage(conv: WaConversation, content: string | Interactive, sender: "AI" | "STAFF", staffLabel?: string | null) {
+  if (typeof content === "string") return deliver(conv, { sender, staffLabel, type: "text", body: content }, { type: "text", body: content });
+  return deliver(
+    conv,
+    { sender, staffLabel, type: "interactive", body: interactiveText(content), meta: content as unknown as Prisma.InputJsonValue },
+    { type: "interactive", message: content },
+  );
+}
+
+export type PreparedTemplate = {
+  template: { id: string; name: string; language: string; category: string };
+  components: unknown[];
+  preview: TemplatePreview;
+  text: string;
+};
+
+/**
+ * Sends an approved template (spec #2). Templates are the one kind of message
+ * WhatsApp delivers outside the 24-hour window, so this is how staff start or
+ * restart a conversation.
+ */
+export async function sendChatTemplate(conv: WaConversation, t: PreparedTemplate, staffLabel: string) {
+  return deliver(
+    conv,
+    {
+      sender: "STAFF",
+      staffLabel,
+      type: "template",
+      body: t.text,
+      meta: { template: t.template.name, language: t.template.language, category: t.template.category, preview: t.preview } as unknown as Prisma.InputJsonValue,
+    },
+    { type: "template_components", name: t.template.name, lang: t.template.language, components: t.components },
+  );
+}
+
+/** The conversation for a number (created when staff message someone first), linked to the CRM. */
+export async function conversationFor(phone: string) {
+  const customer = await prisma.customer.findUnique({ where: { phone }, select: { id: true } });
+  return prisma.waConversation.upsert({
+    where: { phone },
+    create: { phone, customerId: customer?.id ?? null },
+    update: customer ? { customerId: customer.id } : {},
+  });
+}
+
+async function lastInboundWaId(conversationId: string): Promise<string | null> {
+  const last = await prisma.waMessage.findFirst({
+    where: { conversationId, direction: "in", waMessageId: { not: null } },
+    orderBy: { createdAt: "desc" },
+    select: { waMessageId: true },
+  });
+  return last?.waMessageId ?? null;
+}
+
+/**
+ * The customer sees blue ticks (and, with `typing`, "typing…") on their last
+ * message. WhatsApp only offers this for a message they sent us.
+ */
+export async function sendReadReceipt(conv: WaConversation, typing = false): Promise<{ ok: boolean; error?: string }> {
+  if (!whatsappConfigured()) return { ok: false, error: "WhatsApp is not configured on this server." };
+  const id = await lastInboundWaId(conv.id);
+  if (!id) return { ok: false, error: "There is no message from the customer to reply to yet." };
+  const r = await markRead(id, typing);
+  return r.ok ? { ok: true } : { ok: false, error: explainWhatsAppError(r) };
 }
 
 /**
@@ -171,18 +264,30 @@ export async function sendChatMessage(conv: WaConversation, body: string, sender
  */
 export async function aiReply(conversationId: string, triggerMessageId: string): Promise<void> {
   try {
+    // "typing…" straight away — but only when an answer is really coming, as
+    // Meta asks: AI mode with a working assistant.
+    const [first, trigger] = await Promise.all([
+      prisma.waConversation.findUnique({ where: { id: conversationId } }),
+      prisma.waMessage.findUnique({ where: { id: triggerMessageId }, select: { waMessageId: true } }),
+    ]);
+    if (first?.mode === "AI" && (await resolveProvider()).provider) {
+      await prisma.waConversation.update({ where: { id: conversationId }, data: { aiTypingAt: new Date() } });
+      if (trigger?.waMessageId && whatsappConfigured()) void markRead(trigger.waMessageId, true);
+    }
+
     if (DEBOUNCE_MS > 0) await new Promise((r) => setTimeout(r, DEBOUNCE_MS));
 
     const conv = await prisma.waConversation.findUnique({ where: { id: conversationId } });
-    if (!conv || conv.mode !== "AI") return; // staff took over meanwhile
+    if (!conv || conv.mode !== "AI") return stopTyping(conversationId); // staff took over meanwhile
 
     const latest = await prisma.waMessage.findFirst({ where: { conversationId, direction: "in" }, orderBy: { createdAt: "desc" } });
     if (!latest || latest.id !== triggerMessageId) return; // a newer message will answer
     const answered = await prisma.waMessage.findFirst({ where: { conversationId, direction: "out", createdAt: { gt: latest.createdAt } }, select: { id: true } });
-    if (answered) return;
+    if (answered) return stopTyping(conversationId);
 
     const lastHour = await prisma.waMessage.count({ where: { conversationId, sender: "AI", createdAt: { gt: new Date(Date.now() - 3_600_000) } } });
     if (lastHour >= MAX_AI_REPLIES_PER_HOUR) {
+      await stopTyping(conversationId);
       await changeHandling(conversationId, { mode: "HUMAN", state: "REQUIRES_ATTENTION", reason: "Unusually many messages in an hour — AI paused" }, { type: "system" });
       return;
     }
@@ -207,13 +312,14 @@ export async function aiReply(conversationId: string, triggerMessageId: string):
     try {
       answer = await askAssistant(resolved.provider, turns, latest.body);
     } catch (e) {
+      await stopTyping(conversationId);
       await changeHandling(conversationId, { state: "REQUIRES_ATTENTION", reason: `The AI couldn't reply (${(e as Error).message.slice(0, 160)}). A person needs to reply.` }, { type: "ai", label: resolved.provider.label });
       return;
     }
 
     // Staff may have taken over while the model was thinking.
     const now = await prisma.waConversation.findUniqueOrThrow({ where: { id: conversationId } });
-    if (now.mode !== "AI") return;
+    if (now.mode !== "AI") return stopTyping(conversationId);
 
     await sendChatMessage(now, answer.reply, "AI");
     if (answer.handoff) {
@@ -222,9 +328,15 @@ export async function aiReply(conversationId: string, triggerMessageId: string):
       await changeHandling(conversationId, { state: "AI_HANDLING", reason: null }, { type: "ai", label: resolved.provider.label });
     }
   } catch (e) {
+    await stopTyping(conversationId).catch(() => {});
     // eslint-disable-next-line no-console
     console.error("[wa-chat] AI reply failed:", conversationId, e);
   }
+}
+
+/** The assistant won't answer after all: drop the "typing…" bubble. */
+async function stopTyping(conversationId: string) {
+  await prisma.waConversation.updateMany({ where: { id: conversationId, aiTypingAt: { not: null } }, data: { aiTypingAt: null } });
 }
 
 /** Staff take over: the AI stops answering this conversation (spec #40). */

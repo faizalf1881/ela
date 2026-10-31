@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import { customerContext } from "@/lib/ai/assistant";
-import { REPLY_WINDOW_MS } from "@/lib/wa-chat";
+import { isTyping, REPLY_WINDOW_MS } from "@/lib/wa-chat";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,7 +39,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   const windowEndsAt = conversation.lastInboundAt ? new Date(conversation.lastInboundAt.getTime() + REPLY_WINDOW_MS) : null;
   return NextResponse.json({
-    conversation,
+    conversation: { ...conversation, typing: isTyping(conversation) },
     messages: messages.reverse(),
     events: events.reverse(),
     updates: updates.reverse(),

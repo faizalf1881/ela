@@ -143,7 +143,52 @@ function tinyWav(): Uint8Array {
  * WHATSAPP_API_BASE pointing here, so no real message can ever be sent.
  * `wa.mode` makes it fail the way the real API does.
  */
-type WaCall = { url: string; body: { to?: string; type?: string; text?: { body?: string }; template?: { name?: string; components?: { parameters?: { text?: string }[] }[] } } };
+type WaCall = {
+  url: string;
+  body: {
+    to?: string;
+    type?: string;
+    text?: { body?: string };
+    template?: { name?: string; language?: { code?: string }; components?: { type?: string; sub_type?: string; index?: number | string; parameters?: { text?: string; [k: string]: unknown }[] }[] };
+    interactive?: { type?: string; body?: { text?: string }; action?: Record<string, unknown> };
+    status?: string;
+    message_id?: string;
+    typing_indicator?: { type?: string };
+  };
+};
+
+/** What Meta returns for the business account's templates (two pages). */
+const WA_TEMPLATES = [
+  {
+    id: "t1",
+    name: "order_followup",
+    language: "en",
+    status: "APPROVED",
+    category: "UTILITY",
+    parameter_format: "POSITIONAL",
+    components: [{ type: "BODY", text: "Hi {{1}}, your order {{2}} is ready.", example: { body_text: [["Anjali", "#ABC123"]] } }],
+  },
+  {
+    id: "t2",
+    name: "festive_offer",
+    language: "en",
+    status: "APPROVED",
+    category: "MARKETING",
+    parameter_format: "NAMED",
+    components: [
+      { type: "HEADER", format: "IMAGE", example: { header_handle: ["4::aW1hZ2U="] } },
+      {
+        type: "BODY",
+        text: "Hi {{first_name}}! Enjoy {{discount}} off this weekend.",
+        example: { body_text_named_params: [{ param_name: "first_name", example: "Anjali" }, { param_name: "discount", example: "20%" }] },
+      },
+      { type: "FOOTER", text: "Reply STOP to stop offers" },
+      { type: "BUTTONS", buttons: [{ type: "QUICK_REPLY", text: "Order now" }, { type: "URL", text: "View menu", url: "https://elaandco.com/{{1}}", example: ["menu"] }, { type: "COPY_CODE", example: "FEST20" }] },
+    ],
+  },
+  { id: "t3", name: "new_menu_pending", language: "en", status: "PENDING", category: "MARKETING", components: [{ type: "BODY", text: "Our new menu is here!" }] },
+  { id: "t4", name: "survey_flow", language: "en", status: "APPROVED", category: "MARKETING", components: [{ type: "BODY", text: "Tell us how we did" }, { type: "BUTTONS", buttons: [{ type: "FLOW", text: "Start survey" }] }] },
+];
 const wa = { calls: [] as WaCall[], mode: "ok" as "ok" | "fail-auth" | "fail-template" | "fail-window", next: 1 };
 type AiCall = { url: string; body: { model?: string; messages?: { role: string; content: string }[]; format?: string; response_format?: unknown } };
 const ai = { calls: [] as AiCall[], mode: "ok" as "ok" | "fail" };
@@ -254,6 +299,15 @@ function startFakeWhatsApp(port = 4010): Promise<http.Server> {
         return req.url.startsWith("/api/chat")
           ? send(200, { model: aiBody.model, message: { role: "assistant", content }, done: true })
           : send(200, { choices: [{ index: 0, message: { role: "assistant", content } }] });
+      }
+      // Graph API reads: templates (paged) and the number's health.
+      if (req.method === "GET" && /\/message_templates/.test(req.url || "")) {
+        const second = (req.url || "").includes("after=PAGE2");
+        const base = `http://127.0.0.1:4010${(req.url || "").split("?")[0]}`;
+        return send(200, second ? { data: WA_TEMPLATES.slice(2) } : { data: WA_TEMPLATES.slice(0, 2), paging: { cursors: { after: "PAGE2" }, next: `${base}?after=PAGE2&limit=100` } });
+      }
+      if (req.method === "GET" && /\/100200300\?fields=/.test(req.url || "")) {
+        return send(200, { display_phone_number: "+91 79075 77979", verified_name: "Ela & Co.", quality_rating: "GREEN", whatsapp_business_manager_messaging_limit: "TIER_2K", id: "100200300" });
       }
       wa.calls.push({ url: req.url || "", body });
       if (wa.mode === "fail-auth") return send(401, { error: { message: "Authentication Error", type: "OAuthException", code: 190 } });
@@ -1771,6 +1825,98 @@ async function main() {
   ok(aiAudit.total > 0 && !JSON.stringify(aiAudit.logs).includes(aiKey), "AI settings changes are audited without the key");
   const hand = await (await admin.fetch("/api/admin/audit?action=whatsapp.takeover&limit=1")).json();
   ok(hand.total > 0, "takeovers are audited");
+
+  // ---------- Templates, quick replies, new chats, typing (#1/#2) ----------
+  section("WhatsApp templates (quick reply), new chats and typing indicators");
+  type Tpl = { id: string; name: string; status: string; sendable: boolean; unsupported: string | null; variables: { key: string }[] };
+  type ConvT = Conv & { typing?: boolean };
+  ok((await kitchen.fetch("/api/admin/whatsapp/templates")).status === 403, "only admins see WhatsApp templates → 403");
+  ok((await kitchen.fetch("/api/admin/whatsapp/templates/sync", { method: "POST" })).status === 403, "…or sync them → 403");
+  const syncRes = await admin.fetch("/api/admin/whatsapp/templates/sync", { method: "POST" });
+  const syncJ = await syncRes.json();
+  ok(syncRes.status === 200 && syncJ.total === 4 && syncJ.approved === 3, `templates sync from Meta across pages (${syncJ.total} found, ${syncJ.approved} approved)`);
+  const tplAll = (await (await admin.fetch("/api/admin/whatsapp/templates")).json()).templates as Tpl[];
+  const tplSend = (await (await admin.fetch("/api/admin/whatsapp/templates?sendable=1")).json()).templates as Tpl[];
+  ok(tplSend.map((t) => t.name).sort().join() === "festive_offer,order_followup", "only approved templates with supported buttons are offered (pending and Flow ones are held back)");
+  const festive = tplAll.find((t) => t.name === "festive_offer")!;
+  ok(festive.variables.map((v) => v.key).join() === "header_media,body:first_name,body:discount,button:1,button:2", "every variable is found: header image, named fields, link ending, coupon code");
+  ok(/flow/i.test(tplAll.find((t) => t.name === "survey_flow")?.unsupported || ""), "…and staff are told why a template can't be sent");
+  const health = await (await admin.fetch("/api/admin/whatsapp/health")).json();
+  ok(health.ok === true && health.quality === "GREEN" && health.limit === "TIER_2K", "the number's quality rating and daily messaging limit are shown");
+
+  const followup = tplSend.find((t) => t.name === "order_followup")!;
+  const missingVar = await convAction(conv!.id, "template", { templateId: followup.id, values: { "body:1": "Anjali" } });
+  ok(missingVar.status === 400 && /Fill in/.test((await missingVar.json()).error), "a template with an empty variable isn't sent");
+  const pendingTpl = tplAll.find((t) => t.name === "new_menu_pending")!;
+  ok((await convAction(conv!.id, "template", { templateId: pendingTpl.id, values: {} })).status === 400, "a template still waiting for approval can't be sent");
+  ok((await kitchen.fetch(`/api/admin/whatsapp/conversations/${conv!.id}/template`, { method: "POST", body: JSON.stringify({ templateId: followup.id, values: {} }) })).status === 403, "kitchen staff can't send templates → 403");
+  const waBeforeTpl = wa.calls.length;
+  const sentTpl = await convAction(conv!.id, "template", { templateId: followup.id, values: { "body:1": "Anjali", "body:2": "#A1B2C3" } });
+  const sentTplJ = await sentTpl.json();
+  ok(sentTpl.status === 200 && sentTplJ.message?.type === "template" && sentTplJ.message.body.includes("Hi Anjali, your order #A1B2C3 is ready."), "Quick reply sends an approved template even though the 24-hour window is closed");
+  const quickTplCall = wa.calls.slice(waBeforeTpl).find((c) => c.body.type === "template");
+  ok(quickTplCall?.body.template?.name === "order_followup" && JSON.stringify(quickTplCall.body.template?.components).includes('"text":"#A1B2C3"'), "…in WhatsApp's template format, variables in order");
+  ok((await detail(conv!.id)).conversation.state === "WAITING_CUSTOMER", "after the template the chat waits for the customer");
+
+  const festiveValues = { header_media: "https://example.com/onam.jpg", "body:first_name": "Anjali", "body:discount": "20%", "button:1": "menu", "button:2": "FEST20" };
+  const badMedia = await convAction(conv!.id, "template", { templateId: festive.id, values: { ...festiveValues, header_media: "http://example.com/x.jpg" } });
+  ok(badMedia.status === 400, "a header image must be a public https link");
+  const festiveSend = await convAction(conv!.id, "template", { templateId: festive.id, values: festiveValues });
+  ok(festiveSend.status === 200, "a marketing template with an image, named fields and buttons is sent");
+  const fc = JSON.stringify(wa.calls.filter((c) => c.body.template?.name === "festive_offer").pop()?.body.template?.components ?? []);
+  ok(
+    fc.includes('"link":"https://example.com/onam.jpg"') && fc.includes('"parameter_name":"first_name"') && fc.includes('"sub_type":"url","index":1') && fc.includes('"coupon_code":"FEST20"'),
+    "…with the image link, named parameters, the link button ending and the coupon",
+  );
+
+  const newPhone = "7" + String(Date.now()).slice(-9);
+  ok((await admin.fetch("/api/admin/whatsapp/conversations", { method: "POST", body: JSON.stringify({ phone: "123", templateId: followup.id, values: { "body:1": "R", "body:2": "1" } }) })).status === 400, "new chat: an invalid number is refused");
+  ok((await kitchen.fetch("/api/admin/whatsapp/conversations", { method: "POST", body: JSON.stringify({ phone: newPhone, templateId: followup.id, values: {} }) })).status === 403, "new chat is admin-only → 403");
+  const started = await admin.fetch("/api/admin/whatsapp/conversations", { method: "POST", body: JSON.stringify({ phone: newPhone, templateId: followup.id, values: { "body:1": "Ravi", "body:2": "#NEW001" } }) });
+  const startedJ = await started.json();
+  ok(started.status === 201 && startedJ.conversation?.phone === "91" + newPhone, "staff start a new WhatsApp chat with a template");
+  const newDetail = await detail(startedJ.conversation.id);
+  ok(newDetail.messages.length === 1 && newDetail.messages[0].body.includes("Ravi") && newDetail.replyWindow.open === false, "…the chat shows the template; normal replies wait until the customer answers");
+
+  // Manual templates (for accounts without the business account id).
+  const manualTpl = await admin.fetch("/api/admin/whatsapp/templates", { method: "POST", body: JSON.stringify({ name: "hand_added", language: "en", category: "UTILITY", body: "Hello {{1}}, thanks for ordering!" }) });
+  const manualJ = await manualTpl.json();
+  ok(manualTpl.status === 201 && manualJ.template.sendable === true && manualJ.template.variables.length === 1, "an approved template can be added by hand");
+  ok((await admin.fetch("/api/admin/whatsapp/templates", { method: "POST", body: JSON.stringify({ name: "hand_added", language: "en", category: "UTILITY", body: "x" }) })).status === 409, "…once per name and language");
+  ok((await admin.fetch("/api/admin/whatsapp/templates", { method: "POST", body: JSON.stringify({ name: "Bad Name!", language: "en", category: "UTILITY", body: "x" }) })).status === 400, "template names must match WhatsApp's format");
+  ok((await admin.fetch(`/api/admin/whatsapp/templates/${followup.id}`, { method: "DELETE" })).status === 409, "synced templates are managed in WhatsApp Manager, not deleted here");
+  ok((await admin.fetch(`/api/admin/whatsapp/templates/${manualJ.template.id}`, { method: "DELETE" })).status === 200, "a hand-added template can be removed");
+
+  // Read receipts and staff "typing…".
+  const readIn = `wamid.READ${Date.now()}`;
+  await inbound(custPhone, "Thanks, I'll come and collect", { id: readIn });
+  await waitFor(async () => ((await convByPhone(custPhone))?.unreadCount ? true : null));
+  const waBeforeRead = wa.calls.length;
+  await convAction(conv!.id, "read");
+  ok(wa.calls.slice(waBeforeRead).some((c) => c.body.status === "read" && c.body.message_id === readIn && !c.body.typing_indicator), "opening an unread chat shows the customer blue ticks");
+  const typingRes = await convAction(conv!.id, "typing");
+  ok(typingRes.status === 200 && wa.calls.slice(waBeforeRead).some((c) => c.body.typing_indicator?.type === "text" && c.body.message_id === readIn), "while staff type a reply, the customer sees 'typing…'");
+
+  // The assistant's "typing…": in the inbox and on the customer's phone.
+  await convAction(conv!.id, "handback");
+  ok((await convAction(conv!.id, "typing")).status === 409, "staff typing is only sent while a person handles the chat");
+  const waBeforeAi = wa.calls.length;
+  const aiBeforeTyping = (await aiMsgs(conv!.id)).length;
+  const typingIn = `wamid.TYPING${Date.now()}`;
+  await inbound(custPhone, "What time do you open tomorrow?", { id: typingIn });
+  const typingSeen = await waitFor(async () => (((await listConvs()).conversations as ConvT[]).find((c) => c.id === conv!.id)?.typing ? true : null), 4000);
+  ok(!!typingSeen, "staff see 'AI is typing…' while the assistant composes");
+  ok(wa.calls.slice(waBeforeAi).some((c) => c.body.typing_indicator?.type === "text" && c.body.message_id === typingIn), "…and the customer sees WhatsApp's typing indicator on their message");
+  await waitFor(async () => ((await aiMsgs(conv!.id)).length > aiBeforeTyping ? true : null));
+  const stopped = await waitFor(async () => {
+    const c = ((await listConvs()).conversations as ConvT[]).find((x) => x.id === conv!.id);
+    return c && !c.typing ? c : null;
+  });
+  ok(!!stopped, "the typing indicator stops once the reply is sent");
+  const idxTyping = wa.calls.findIndex((c, i) => i >= waBeforeAi && !!c.body.typing_indicator);
+  const idxReply = wa.calls.findIndex((c, i) => i >= waBeforeAi && c.body.type === "text" && c.body.to === custPhone);
+  ok(idxTyping >= 0 && idxReply > idxTyping, "…typing first, then the answer");
+
 
   // ---------- Payments: Cashfree, payment links, webhooks, refunds ----------
   section("Payments: Cashfree checkout, payment links, webhooks and refunds");

@@ -103,6 +103,25 @@ export function explainWhatsAppError(r: GraphResult): string {
     case 132000:
     case 132001:
       return `The WhatsApp template wasn't accepted (name, language or approval). ${detail}`;
+    case 131008:
+    case 132012:
+    case 132018:
+      return `A template variable is missing or in the wrong format. ${detail}`;
+    case 132015:
+    case 132016:
+      return "This template is paused or disabled by WhatsApp (usually low quality feedback). Pick another.";
+    case 131049:
+      return "WhatsApp held back this marketing message to protect the customer's experience (they've had many recently). Try again after 24 hours.";
+    case 131050:
+      return "This customer has stopped marketing messages from you on WhatsApp.";
+    case 131056:
+      return "Too many messages to this number in a short time. Wait a moment and try again.";
+    case 130472:
+      return "WhatsApp didn't deliver this to the customer as part of a Meta experiment. Nothing to fix.";
+    case 130429:
+      return "Sending too fast for WhatsApp's limit. The rest will go out shortly.";
+    case 131048:
+      return "WhatsApp limited sending from this number because of spam reports. Slow down and check the number's quality in WhatsApp Manager.";
     default:
       return r.status === 0 ? `Could not reach WhatsApp: ${detail}` : `WhatsApp error${code ? ` ${code}` : ""}: ${detail}`;
   }

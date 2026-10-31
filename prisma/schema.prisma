@@ -626,6 +626,8 @@ model WaConversation {
   lastInboundAt   DateTime?
   lastPreview     String?
   handledByLabel  String?
+  /// Set while the assistant is working on a reply (the "typing…" bubble staff see).
+  aiTypingAt      DateTime?
   createdAt       DateTime          @default(now())
   updatedAt       DateTime          @updatedAt
   messages        WaMessage[]
@@ -647,6 +649,11 @@ model WaMessage {
   /// text | image | audio | video | document | sticker | location | ...
   type           String         @default("text")
   body           String
+  /// Inbound: the id of the button / list row the customer tapped.
+  replyId        String?
+  /// Outbound interactive or template messages: their buttons, rows and
+  /// template details, so staff see what the customer saw.
+  meta           Json?
   waMessageId    String?        @unique
   /// Outbound only: sent | delivered | read | failed.
   status         String?
@@ -673,6 +680,32 @@ model WaHandlingEvent {
   createdAt      DateTime       @default(now())
 
   @@index([conversationId, createdAt])
+}
+
+/// WhatsApp message templates (spec #2/#3): synced from Meta (needs
+/// WHATSAPP_BUSINESS_ACCOUNT_ID) or added by hand. Only APPROVED ones are sent;
+/// they are the only messages WhatsApp delivers outside the 24-hour window.
+model WaTemplate {
+  id              String   @id @default(cuid())
+  name            String
+  language        String
+  /// MARKETING | UTILITY | AUTHENTICATION
+  category        String
+  /// APPROVED | PENDING | REJECTED | PAUSED | DISABLED | … (as Meta reports it)
+  status          String
+  /// POSITIONAL ({{1}}) or NAMED ({{first_name}})
+  parameterFormat String   @default("POSITIONAL")
+  /// The template's components exactly as Meta returns them.
+  components      Json
+  /// meta = synced · manual = added in Admin
+  source          String   @default("meta")
+  metaId          String?
+  syncedAt        DateTime @default(now())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([name, language])
+  @@index([status])
 }
 
 /// The AI assistant's configuration (spec #43). A single row. The OpenAI key is
