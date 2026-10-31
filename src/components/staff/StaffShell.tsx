@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText, MapPin, TicketPercent, Wallet, Contact, Star, LifeBuoy, Crown, CalendarClock, Settings, MessageCircle, MessagesSquare } from "lucide-react";
+import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText, MapPin, TicketPercent, Wallet, Contact, Star, LifeBuoy, Crown, CalendarClock, Settings, MessageCircle, MessagesSquare, Globe } from "lucide-react";
 import { useAuth, type Role } from "@/lib/auth-client";
 import { BrandLogo } from "@/components/site/BrandLogo";
 
@@ -12,6 +12,7 @@ const ADMIN_NAV = [
   { href: "/admin/accounts", label: "Accounts", icon: Wallet },
   { href: "/admin/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/admin/menu", label: "Menu", icon: UtensilsCrossed },
+  { href: "/admin/website", label: "Website", icon: Globe },
   { href: "/admin/locations", label: "Locations", icon: MapPin },
   { href: "/admin/schedule", label: "Schedule", icon: CalendarClock },
   { href: "/admin/coupons", label: "Coupons", icon: TicketPercent },

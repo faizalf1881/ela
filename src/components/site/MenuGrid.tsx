@@ -19,9 +19,10 @@ export type MenuCardItem = {
   imageUrl: string | null;
   category: string;
   stock: number | null;
+  servingInfo?: string | null;
 };
 
-export function MenuGrid({ items, accepting = true }: { items: MenuCardItem[]; accepting?: boolean }) {
+export function MenuGrid({ items, accepting = true, deliveryTime = "45 min" }: { items: MenuCardItem[]; accepting?: boolean; deliveryTime?: string }) {
   const { add, setQty, items: cart } = useCart();
   const [cat, setCat] = useState("All");
   const [q, setQ] = useState("");
@@ -129,6 +130,7 @@ export function MenuGrid({ items, accepting = true }: { items: MenuCardItem[]; a
                           {Array.from({ length: 3 }).map((_, s) => (
                             <Flame key={s} className={`h-3 w-3 ${s < m.spice ? "text-gold" : "text-muted-foreground/30"}`} />
                           ))}
+                          {m.servingInfo && <span className="ml-1.5 text-[11px] text-muted-foreground">{m.servingInfo}</span>}
                         </div>
                       </div>
                       <div className="text-right shrink-0">
@@ -145,7 +147,7 @@ export function MenuGrid({ items, accepting = true }: { items: MenuCardItem[]; a
                         {lowStock ? (
                           <span className="text-gold">Only {m.stock} left</span>
                         ) : (
-                          <span className="hidden sm:inline">Freshly prepared · 30–45 min</span>
+                          <span className="hidden sm:inline">Freshly prepared · {deliveryTime}</span>
                         )}
                       </div>
 

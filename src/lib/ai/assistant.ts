@@ -3,6 +3,8 @@ import { prisma } from "../db";
 import { inr } from "../utils";
 import { STATUS_LABEL, type OrderStatus } from "../order-status";
 import { istDateKey } from "../delivery";
+import { effectivePrice } from "../pricing";
+import { publicSiteInfo, resolveFeatured } from "../site-content";
 import type { AiProvider, ChatTurn } from "./providers";
 
 /**
@@ -88,13 +90,17 @@ export type CustomerContext = Awaited<ReturnType<typeof customerContext>>;
 
 /** Public facts about the restaurant, straight from the live settings. */
 async function businessFacts(): Promise<string> {
-  const [setting, menu, locations, slots, plans] = await Promise.all([
+  const [setting, menu, locations, slots, plans, content] = await Promise.all([
     prisma.storeSetting.findUnique({ where: { id: 1 } }),
     prisma.menuItem.findMany({ where: { available: true }, orderBy: { sortOrder: "asc" } }),
     prisma.deliveryLocation.findMany({ where: { active: true }, orderBy: { sortOrder: "asc" } }),
     prisma.deliverySlot.findMany({ where: { active: true }, orderBy: { startMinutes: "asc" } }),
     prisma.subscriptionPlan.findMany({ where: { active: true }, orderBy: { price: "asc" } }),
+    prisma.siteContent.findUnique({ where: { id: 1 } }),
   ]);
+  // The same website content and menu the homepage shows (spec #9).
+  const info = publicSiteInfo(content);
+  const featured = resolveFeatured(menu, content, effectivePrice);
   const site = process.env.NEXT_PUBLIC_SITE_URL || "our website";
   const cutoff = setting?.orderCutoffMinutes ?? 480;
   const cutoffText = `${((Math.floor(cutoff / 60) + 11) % 12) + 1}:${String(cutoff % 60).padStart(2, "0")} ${cutoff >= 720 ? "PM" : "AM"}`;
@@ -108,11 +114,16 @@ async function businessFacts(): Promise<string> {
     `Delivery times: ${slots.map((s) => s.label).join("; ") || "chosen at checkout"}.`,
     `Delivery areas and fees: ${locations.map((l) => `${l.name}${l.area ? ` (${l.area})` : ""} ${l.deliveryFee > 0 ? inr(l.deliveryFee) : "free"}`).join("; ") || "shown at checkout"}.`,
     `Payment: online (UPI/cards)${setting?.codEnabled ? " or cash on delivery" : ""}.`,
+    `Usual delivery time: about ${info.deliveryTime}.`,
+    info.openingHours ? `Opening hours: ${info.openingHours}.` : "",
+    featured ? `Featured on our website as "${featured.label}": ${featured.name} (${inr(featured.price)}).` : "",
+    info.promo ? `Current offer: ${info.promo.text}${info.promo.code ? ` (code ${info.promo.code})` : ""}.` : "No special offers right now.",
+    `Contact: phone ${info.phone}, email ${info.email}. Address: ${info.address}.`,
     "Menu:",
     ...menu.map((m) => {
       const price = m.discountPercent > 0 ? `${inr(Math.round(m.price * (1 - m.discountPercent / 100)))} (was ${inr(m.price)})` : inr(m.price);
       const stock = m.stock !== null && m.stock <= 0 ? " — sold out today" : "";
-      return `- ${m.name}: ${price}. ${m.description}${stock}`;
+      return `- ${m.name}: ${price}.${m.servingInfo ? ` ${m.servingInfo}.` : ""} ${m.description}${stock}`;
     }),
     plans.length ? "Memberships / meal plans:" : "",
     ...plans.map((p) => `- ${p.name}: ${inr(p.price)} per ${p.interval.toLowerCase().replace("ly", "")}${p.discountPercent ? `, ${p.discountPercent}% off orders` : ""}${p.freeDelivery ? ", free delivery" : ""}${p.kind === "MEAL" ? ", daily meals delivered" : ""}.`),

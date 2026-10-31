@@ -67,12 +67,47 @@ model MenuItem {
   imageUrl        String?
   available       Boolean  @default(true)
   stock           Int? // null = unlimited; else remaining orderable quantity
+  /// e.g. "Serves 1" — shown on the menu and used by the WhatsApp assistant.
+  servingInfo     String?
   sortOrder       Int      @default(0)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   orderItems    OrderItem[]
   planMealItems PlanMealItem[]
+  featuredOn    SiteContent[]
+}
+
+/// Customer-facing website content the owner manages from Admin → Website
+/// (spec #6/#7). One row; a blank field falls back to the built-in default.
+model SiteContent {
+  id             Int       @id @default(1)
+  /// The dish in the homepage hero card, and how it is labelled.
+  featuredItem   MenuItem? @relation(fields: [featuredItemId], references: [id], onDelete: SetNull)
+  featuredItemId String?
+  featuredLabel  String    @default("Today's Special")
+  /// Optional line shown instead of the dish description.
+  featuredNote   String?
+  /// Offer banner on the homepage (also known to the WhatsApp assistant).
+  promoActive    Boolean   @default(false)
+  promoText      String?
+  promoCode      String?
+  /// Hero highlights: [{ value, label }], up to 3. A blank value = automatic.
+  heroStats      Json?
+  /// Rating badge: AUTO (from published reviews) | CUSTOM | HIDDEN.
+  ratingMode     String    @default("AUTO")
+  ratingValue    String?
+  ratingNote     String?
+  /// Delivery promise and contact details.
+  deliveryTime   String?
+  openingHours   String?
+  phone          String?
+  email          String?
+  address        String?
+  instagramUrl   String?
+  facebookUrl    String?
+  xUrl           String?
+  updatedAt      DateTime  @updatedAt
 }
 
 enum OrderStatus {

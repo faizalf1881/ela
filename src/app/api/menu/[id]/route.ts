@@ -17,6 +17,7 @@ const updateSchema = z.object({
   imageUrl: z.string().max(600).nullable().optional(),
   available: z.boolean().optional(),
   stock: z.number().int().min(0).max(100000).nullable().optional(),
+  servingInfo: z.string().trim().max(40).nullable().optional().transform((v) => (v === undefined ? undefined : v || null)),
   sortOrder: z.number().int().optional(),
 });
 

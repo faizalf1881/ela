@@ -1,16 +1,29 @@
 import { Sparkles, Leaf, Wheat, ShieldCheck, Bike, Lock, Heart } from "lucide-react";
 
-const items = [
-  { i: Sparkles, t: "Freshly Prepared Daily", d: "Cooked the morning of delivery." },
-  { i: Leaf, t: "Traditional Recipes", d: "Handed down through generations." },
-  { i: Wheat, t: "Premium Ingredients", d: "Sourced from Kerala farms." },
-  { i: ShieldCheck, t: "Hygienic Cooking", d: "FSSAI certified kitchens." },
-  { i: Bike, t: "Fast Delivery", d: "Piping hot in under 45 minutes." },
-  { i: Lock, t: "Secure Payments", d: "UPI, cards, wallets, COD." },
-  { i: Heart, t: "Loved by Customers", d: "4.9★ across 2,400+ reviews." },
-];
+/**
+ * The delivery time, payment options and rating are live (Admin → Website,
+ * the COD switch, published reviews) so this section never promises more
+ * than the business currently offers.
+ */
+export function WhyUs({
+  deliveryTime,
+  codEnabled = true,
+  rating,
+}: {
+  deliveryTime: string;
+  codEnabled?: boolean;
+  rating: { value: string; note: string } | null;
+}) {
+  const items = [
+    { i: Sparkles, t: "Freshly Prepared Daily", d: "Cooked the morning of delivery." },
+    { i: Leaf, t: "Traditional Recipes", d: "Handed down through generations." },
+    { i: Wheat, t: "Premium Ingredients", d: "Sourced from Kerala farms." },
+    { i: ShieldCheck, t: "Hygienic Cooking", d: "FSSAI certified kitchens." },
+    { i: Bike, t: "Fast Delivery", d: `Piping hot, delivered in about ${deliveryTime}.` },
+    { i: Lock, t: "Secure Payments", d: codEnabled ? "UPI, cards, wallets, COD." : "UPI, cards and wallets." },
+    { i: Heart, t: "Loved by Customers", d: rating ? `Rated ${rating.value}${rating.note ? ` across ${rating.note}` : ""}.` : "Our regulars keep coming back." },
+  ];
 
-export function WhyUs() {
   return (
     <section className="relative py-24 sm:py-32">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">

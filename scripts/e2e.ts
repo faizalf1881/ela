@@ -381,6 +381,92 @@ async function main() {
   const loginKnown = await new Client().fetch("/api/auth/otp/request", { method: "POST", body: JSON.stringify({ phone, mode: "login" }) });
   ok(loginKnown.status === 200 || loginKnown.status === 429, "login with registered number accepted (no 404)");
 
+  // ---------- Website content (#6/#7) ----------
+  section("Website content: homepage dish, offer banner, contact");
+  const homeNow = async () => (await new Client().fetch("/")).text();
+  const featuredOf = (html: string) => html.match(/data-featured-id="([^"]+)"/)?.[1] ?? null;
+  const featuredPrice = (html: string) => Number(html.match(/data-featured-price="(\d+)"/)?.[1] ?? NaN);
+  const eff = (m: { price: number; discountPercent: number }) => Math.round((m.price * (100 - m.discountPercent)) / 100);
+  ok((await new Client().fetch("/api/admin/site")).status === 401, "website settings need a login → 401");
+  ok((await customer.fetch("/api/admin/site")).status === 403, "customers can't open website settings → 403");
+  ok((await kitchen.fetch("/api/admin/site", { method: "PATCH", body: JSON.stringify({ promoActive: false }) })).status === 403, "kitchen staff can't change the website → 403");
+  const siteRes = await admin.fetch("/api/admin/site");
+  const site0 = await siteRes.json();
+  ok(siteRes.status === 200 && site0.content === null && !!site0.preview?.featured?.id, "admin opens Website (nothing chosen yet → automatic dish)");
+  const home0 = await homeNow();
+  ok(!home0.includes("Onam Sadya Feast") && !home0.includes("₹349"), "the old hard-coded dish and price are gone from the homepage");
+  ok(featuredOf(home0) === site0.preview.featured.id, "until a dish is chosen, the homepage shows the first dish in stock");
+  ok(!home0.includes('href="#"'), "no dead social-media links");
+
+  const fish = menu.find((m) => /fish/i.test(m.name)) ?? menu[2];
+  await admin.fetch(`/api/menu/${fish.id}`, { method: "PATCH", body: JSON.stringify({ servingInfo: "Serves 1" }) });
+  const setFeat = await admin.fetch("/api/admin/site", {
+    method: "PATCH",
+    body: JSON.stringify({ featuredItemId: fish.id, featuredLabel: "Most Popular", featuredNote: "Kudam puli fish curry, kappa and rice" }),
+  });
+  ok(setFeat.status === 200 && (await setFeat.json()).preview.featured.id === fish.id, "admin chooses the homepage dish and its badge");
+  const home1 = await waitFor(async () => {
+    const h = await homeNow();
+    return featuredOf(h) === fish.id ? h : null;
+  });
+  ok(!!home1, "the homepage shows the chosen dish straight away");
+  ok(
+    !!home1 && home1.includes("Most Popular") && home1.includes("Kudam puli fish curry, kappa and rice") && home1.includes("Serves 1") && featuredPrice(home1) === eff(fish),
+    "…with its badge, description, serving and the menu's real price",
+  );
+  await admin.fetch(`/api/menu/${fish.id}`, { method: "PATCH", body: JSON.stringify({ price: fish.price + 20 }) });
+  const home2 = await waitFor(async () => {
+    const h = await homeNow();
+    return featuredPrice(h) === eff({ ...fish, price: fish.price + 20 }) ? h : null;
+  });
+  ok(!!home2, "a price change in Menu updates the homepage dish — no code change");
+  await admin.fetch(`/api/menu/${fish.id}`, { method: "PATCH", body: JSON.stringify({ available: false }) });
+  const home3 = await waitFor(async () => {
+    const h = await homeNow();
+    const f = featuredOf(h);
+    return f && f !== fish.id ? h : null;
+  });
+  ok(!!home3, "a hidden dish is never advertised — the card falls back to a dish in stock");
+  ok((await (await admin.fetch("/api/admin/site")).json()).preview.featuredHidden === true, "…and the admin is told why");
+  await admin.fetch(`/api/menu/${fish.id}`, { method: "PATCH", body: JSON.stringify({ available: true, price: fish.price }) });
+
+  ok((await admin.fetch("/api/admin/site", { method: "PATCH", body: JSON.stringify({ promoActive: true, promoText: "" }) })).status === 400, "the offer banner can't go on without text");
+  await admin.fetch("/api/admin/site", { method: "PATCH", body: JSON.stringify({ promoActive: true, promoText: "Free delivery this weekend", promoCode: "weekend" }) });
+  const home4 = await waitFor(async () => {
+    const h = await homeNow();
+    return h.includes("Free delivery this weekend") ? h : null;
+  });
+  ok(!!home4 && home4.includes("WEEKEND"), "the offer banner shows on the homepage with its code");
+  await admin.fetch("/api/admin/site", { method: "PATCH", body: JSON.stringify({ promoActive: false }) });
+  ok(!!(await waitFor(async () => !(await homeNow()).includes("Free delivery this weekend"))), "switching the offer off removes it");
+
+  const contactRes = await admin.fetch("/api/admin/site", {
+    method: "PATCH",
+    body: JSON.stringify({
+      phone: "+91 90000 11111",
+      instagramUrl: "https://instagram.com/elaandco",
+      deliveryTime: "40 min",
+      openingHours: "Mon–Sat, 11 AM – 9 PM",
+      heroStats: [{ value: "", label: "" }, { value: "100%", label: "Homemade" }, { value: "", label: "Avg delivery" }],
+    }),
+  });
+  ok(contactRes.status === 200, "admin saves contact details, delivery time and highlights");
+  const pubSite = await (await new Client().fetch("/api/site")).json();
+  ok(
+    pubSite.info?.phone === "+91 90000 11111" && pubSite.info.socials.instagram === "https://instagram.com/elaandco" && pubSite.info.deliveryTime === "40 min",
+    "the public details (footer on every page) reflect the change",
+  );
+  const home5 = await waitFor(async () => {
+    const h = await homeNow();
+    return h.includes("+91 90000 11111") ? h : null;
+  });
+  ok(!!home5 && home5.includes("https://instagram.com/elaandco") && home5.includes("40 min") && home5.includes("Mon–Sat, 11 AM – 9 PM"), "homepage footer, delivery time and hours use the new details");
+  ok((await admin.fetch("/api/admin/site", { method: "PATCH", body: JSON.stringify({ featuredItemId: "nope" }) })).status === 400, "only a real menu dish can be featured");
+  ok((await admin.fetch("/api/admin/site", { method: "PATCH", body: JSON.stringify({ instagramUrl: "javascript:alert(1)" }) })).status === 400, "unsafe links are rejected");
+  ok((await admin.fetch("/api/admin/site", { method: "PATCH", body: JSON.stringify({ email: "not-an-email" }) })).status === 400, "an invalid email is rejected");
+  const siteAudit = await (await admin.fetch("/api/admin/audit?action=site.updated&limit=5")).json();
+  ok(siteAudit.total > 0, "website changes are audited");
+
   // ---------- Delivery locations ----------
   section("Delivery locations");
   const locRes = await admin.fetch("/api/locations", {
@@ -1475,6 +1561,7 @@ async function main() {
   const sys = lastPrompt()[0]?.content ?? "";
   ok(sys.includes(`#${nOrder.id.slice(-6).toUpperCase()}`) && sys.includes(menu[0].name), "the AI sees this customer's orders and the live menu");
   ok(sys.includes("Friday is fish day"), "the admin's extra guidance reaches the AI");
+  ok(sys.includes(`Featured on our website as "Most Popular": ${fish.name}`) && sys.includes("Serves 1") && sys.includes("+91 90000 11111"), "the AI knows the featured dish, serving sizes and contact details from Admin → Website");
   ok(!sys.includes("Zara Other") && !sys.includes(phone2) && !sys.includes(otherOrder.id.slice(-6).toUpperCase()), "no other customer's data is ever in the AI's context");
   ok(lastPrompt().some((m) => m.role === "user" && m.content.includes("Kerala meal available")), "earlier messages are passed as conversation history");
   ok((await convByPhone(custPhone))?.state === "AI_HANDLING", "state returns to AI handling after a good reply");

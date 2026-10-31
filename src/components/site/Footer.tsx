@@ -1,11 +1,41 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { BrandLogo } from "./BrandLogo";
 import { WhatsAppGlyph } from "./WhatsAppGlyph";
-import { Instagram, Facebook, Twitter, MessageCircle, Mail, MapPin, Phone } from "lucide-react";
+import { Instagram, Facebook, Twitter, MessageCircle, Mail, MapPin, Phone, Clock } from "lucide-react";
+import { publicSiteInfo, type PublicSiteInfo } from "@/lib/site-content";
 
 const WA = process.env.NEXT_PUBLIC_WHATSAPP_NUMBER || "917907577979";
 
-export function Footer() {
+/**
+ * Contact details come from Admin → Website (spec #7). The homepage passes them
+ * in; other pages load the same (cached) details, showing the built-in ones
+ * for the moment it takes.
+ */
+export function Footer({ info: given }: { info?: PublicSiteInfo }) {
+  const [loaded, setLoaded] = useState<PublicSiteInfo | null>(null);
+  useEffect(() => {
+    if (given) return;
+    let alive = true;
+    fetch("/api/site")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => alive && d?.info && setLoaded(d.info))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [given]);
+  const info = given ?? loaded ?? publicSiteInfo(null);
+
+  const socials = [
+    { href: info.socials.instagram, icon: Instagram, label: "Instagram" },
+    { href: info.socials.facebook, icon: Facebook, label: "Facebook" },
+    { href: info.socials.x, icon: Twitter, label: "X (Twitter)" },
+    { href: `https://wa.me/${WA}`, icon: MessageCircle, label: "WhatsApp" },
+  ].filter((s): s is { href: string; icon: typeof Instagram; label: string } => !!s.href);
+
   return (
     <footer className="relative bg-charcoal text-ivory">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-20">
@@ -53,24 +83,31 @@ export function Footer() {
             <ul className="space-y-3 text-sm text-ivory/80">
               <li className="flex items-start gap-3">
                 <MapPin className="h-4 w-4 text-gold mt-0.5 shrink-0" />
-                <span>TC 11/1074, PKRA 130, Pattom P.O., Thiruvananthapuram, Kerala — 695004</span>
+                <span>{info.address}</span>
               </li>
               <li className="flex items-center gap-3">
                 <Phone className="h-4 w-4 text-gold" />
-                <a href={`tel:+${WA}`} className="hover:text-gold">+91 79075 77979</a>
+                <a href={info.phoneDial ? `tel:+${info.phoneDial}` : undefined} className="hover:text-gold">{info.phone}</a>
               </li>
               <li className="flex items-center gap-3">
                 <Mail className="h-4 w-4 text-gold" />
-                <a href="mailto:admin.ela.co@gmail.com" className="hover:text-gold">admin.ela.co@gmail.com</a>
+                <a href={`mailto:${info.email}`} className="hover:text-gold">{info.email}</a>
               </li>
+              {info.openingHours && (
+                <li className="flex items-start gap-3">
+                  <Clock className="h-4 w-4 text-gold mt-0.5 shrink-0" />
+                  <span>{info.openingHours}</span>
+                </li>
+              )}
             </ul>
             <div className="mt-6 flex items-center gap-3">
-              {[Instagram, Facebook, Twitter, MessageCircle].map((I, i) => (
+              {socials.map(({ href, icon: I, label }) => (
                 <a
-                  key={i}
-                  href={i === 3 ? `https://wa.me/${WA}` : "#"}
-                  target={i === 3 ? "_blank" : undefined}
-                  rel={i === 3 ? "noreferrer" : undefined}
+                  key={label}
+                  href={href}
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label={label}
                   className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/15 hover:border-gold hover:text-gold transition-colors"
                 >
                   <I className="h-4 w-4" />

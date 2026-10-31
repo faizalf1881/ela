@@ -1,4 +1,6 @@
-import { getPublicMenu, getStoreSetting, getPublishedReviews } from "@/lib/menu-cache";
+import { getPublicMenu, getStoreSetting, getPublishedReviews, getSiteContent } from "@/lib/menu-cache";
+import { effectivePrice } from "@/lib/pricing";
+import { heroStats, publicSiteInfo, ratingBadge, resolveFeatured, type FeaturedDish, type HeroStat, type PublicSiteInfo } from "@/lib/site-content";
 import { Navbar } from "@/components/site/Navbar";
 import { Hero } from "@/components/site/Hero";
 import { MenuGrid, type MenuCardItem } from "@/components/site/MenuGrid";
@@ -12,12 +14,26 @@ import { Footer, WhatsAppFab } from "@/components/site/Footer";
 
 // ISR: the homepage is served as cached static HTML from the CDN and regenerated
 // at most every 5 min — or instantly when an admin edits the menu / store status
-// (revalidateTag on the "menu"/"settings" tags this page's data reads).
+// / website content (revalidateTag on the tags this page's data reads).
 export const revalidate = 300;
 
-async function getData(): Promise<{ menu: MenuCardItem[]; accepting: boolean; closedMessage: string | null; reviews: ReviewItem[] }> {
+type HomeData = {
+  menu: MenuCardItem[];
+  accepting: boolean;
+  closedMessage: string | null;
+  codEnabled: boolean;
+  reviews: ReviewItem[];
+  featured: FeaturedDish | null;
+  stats: HeroStat[];
+  rating: { value: string; note: string } | null;
+  info: PublicSiteInfo;
+};
+
+async function getData(): Promise<HomeData> {
   try {
-    const [items, setting, reviews] = await Promise.all([getPublicMenu(), getStoreSetting(), getPublishedReviews()]);
+    const [items, setting, reviews, content] = await Promise.all([getPublicMenu(), getStoreSetting(), getPublishedReviews(), getSiteContent()]);
+    const info = publicSiteInfo(content);
+    const rating = ratingBadge(content, reviews);
     return {
       menu: items.map((m) => ({
         id: m.id,
@@ -30,18 +46,25 @@ async function getData(): Promise<{ menu: MenuCardItem[]; accepting: boolean; cl
         imageUrl: m.imageUrl,
         category: m.category,
         stock: m.stock,
+        servingInfo: m.servingInfo,
       })),
       accepting: setting ? setting.acceptingOrders : true,
       closedMessage: setting?.closedMessage ?? null,
+      codEnabled: setting?.codEnabled ?? true,
       reviews: reviews.map((r) => ({ authorName: r.authorName, location: r.location, rating: r.rating, body: r.body })),
+      featured: resolveFeatured(items, content, effectivePrice),
+      stats: heroStats(content, { dishCount: items.length, deliveryTime: info.deliveryTime }),
+      rating,
+      info,
     };
   } catch {
-    return { menu: [], accepting: true, closedMessage: null, reviews: [] };
+    const info = publicSiteInfo(null);
+    return { menu: [], accepting: true, closedMessage: null, codEnabled: true, reviews: [], featured: null, stats: heroStats(null, { dishCount: 0, deliveryTime: info.deliveryTime }), rating: null, info };
   }
 }
 
 export default async function HomePage() {
-  const { menu, accepting, closedMessage, reviews } = await getData();
+  const { menu, accepting, closedMessage, codEnabled, reviews, featured, stats, rating, info } = await getData();
   return (
     <main className="min-h-screen bg-background">
       <Navbar />
@@ -52,14 +75,14 @@ export default async function HomePage() {
           </div>
         </div>
       )}
-      <Hero />
-      <MenuGrid items={menu} accepting={accepting} />
+      <Hero featured={featured} promo={info.promo} stats={stats} rating={rating} accepting={accepting} />
+      <MenuGrid items={menu} accepting={accepting} deliveryTime={info.deliveryTime} />
       <Story />
-      <WhyUs />
+      <WhyUs deliveryTime={info.deliveryTime} codEnabled={codEnabled} rating={rating} />
       <Reviews reviews={reviews} />
       <Gallery />
       <CTA />
-      <Footer />
+      <Footer info={info} />
       <WhatsAppFab mobile="above-cart" />
       <CartBar />
     </main>

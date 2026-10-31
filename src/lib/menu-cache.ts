@@ -2,7 +2,7 @@ import { unstable_cache } from "next/cache";
 import { prisma } from "./db";
 
 /** Cache tags — call revalidateTag(...) from mutations to bust these instantly. */
-export const CACHE_TAGS = { menu: "menu", settings: "settings", locations: "locations", reviews: "reviews" } as const;
+export const CACHE_TAGS = { menu: "menu", settings: "settings", locations: "locations", reviews: "reviews", content: "content" } as const;
 
 /**
  * Public (available) menu, cached in the Vercel Data Cache. Served from cache on
@@ -46,4 +46,11 @@ export const getPublishedReviews = unstable_cache(
     }),
   ["published-reviews-v1"],
   { tags: [CACHE_TAGS.reviews], revalidate: 300 },
+);
+
+/** Website content (featured dish, offer banner, contact details), cached; busted on save in Admin → Website. */
+export const getSiteContent = unstable_cache(
+  async () => prisma.siteContent.findUnique({ where: { id: 1 } }),
+  ["site-content-v1"],
+  { tags: [CACHE_TAGS.content], revalidate: 300 },
 );

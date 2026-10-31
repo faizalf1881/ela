@@ -19,6 +19,7 @@ type MenuItem = {
   imageUrl: string | null;
   available: boolean;
   stock: number | null;
+  servingInfo: string | null;
   sortOrder: number;
 };
 
@@ -34,6 +35,7 @@ type Draft = {
   imageUrl: string;
   available: boolean;
   stock: string; // "" = unlimited
+  servingInfo: string;
   sortOrder: number;
 };
 
@@ -48,6 +50,7 @@ const BLANK: Draft = {
   imageUrl: "",
   available: true,
   stock: "",
+  servingInfo: "",
   sortOrder: 0,
 };
 
@@ -86,6 +89,7 @@ export function MenuManager() {
         imageUrl: draft.imageUrl || null,
         available: draft.available,
         stock: draft.stock.trim() === "" ? null : Number(draft.stock),
+        servingInfo: draft.servingInfo.trim() || null,
         sortOrder: Number(draft.sortOrder) || 0,
       };
       const res = draft.id
@@ -161,7 +165,7 @@ export function MenuManager() {
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="font-serif text-lg text-foreground truncate">{m.name}</div>
-                      <div className="text-xs text-muted-foreground">{m.category}{m.tag ? ` · ${m.tag}` : ""}</div>
+                      <div className="text-xs text-muted-foreground">{m.category}{m.tag ? ` · ${m.tag}` : ""}{m.servingInfo ? ` · ${m.servingInfo}` : ""}</div>
                     </div>
                     <div className="text-right shrink-0">
                       <div className="font-serif text-lg text-foreground">{inr(eff)}</div>
@@ -181,6 +185,7 @@ export function MenuManager() {
                           tag: m.tag ?? "",
                           imageUrl: m.imageUrl ?? "",
                           stock: m.stock === null ? "" : String(m.stock),
+                          servingInfo: m.servingInfo ?? "",
                         })
                       }
                       className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1.5 text-xs hover:bg-muted"
@@ -226,6 +231,12 @@ export function MenuManager() {
                 <Input label="Category" value={draft.category} onChange={(v) => setDraft({ ...draft, category: v })} />
                 <Input label="Tag (optional)" value={draft.tag} onChange={(v) => setDraft({ ...draft, tag: v })} />
               </div>
+              <Input
+                label="Serving (optional) — shown on the menu, website and to the WhatsApp assistant"
+                value={draft.servingInfo}
+                onChange={(v) => setDraft({ ...draft, servingInfo: v })}
+                placeholder="e.g. Serves 1"
+              />
               <div className="grid grid-cols-2 gap-3">
                 <label className="block">
                   <span className="text-xs text-muted-foreground">Spice (0–3)</span>
