@@ -147,6 +147,7 @@ type WaCall = { url: string; body: { to?: string; type?: string; text?: { body?:
 const wa = { calls: [] as WaCall[], mode: "ok" as "ok" | "fail-auth" | "fail-template" | "fail-window", next: 1 };
 type AiCall = { url: string; body: { model?: string; messages?: { role: string; content: string }[]; format?: string; response_format?: unknown } };
 const ai = { calls: [] as AiCall[], mode: "ok" as "ok" | "fail" };
+let rzpSeq = 1;
 
 /** Scripted model: hands off on "refund", otherwise answers normally (so the keyword safety net can be tested). */
 function fakeAiAnswer(body: AiCall["body"]): string {
@@ -171,6 +172,17 @@ function startFakeWhatsApp(port = 4010): Promise<http.Server> {
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(obj));
       };
+      // Razorpay REST API (orders, plans, subscriptions) — the app is started
+      // with RAZORPAY_API_BASE pointing here, so tests never need live keys.
+      const rzp = req.url?.match(/^\/v1\/(orders|plans|subscriptions)(?:\/([^/?]+)\/(cancel))?/);
+      if (rzp && !req.url?.startsWith("/v1/chat")) {
+        const [, kind, id] = rzp;
+        const n = rzpSeq++;
+        if (kind === "orders") return send(200, { id: `order_E2E${n}${Date.now()}`, entity: "order", amount: (body as { amount?: number }).amount, currency: "INR", receipt: (body as { receipt?: string }).receipt, status: "created" });
+        if (kind === "plans") return send(200, { id: `plan_E2E${n}`, entity: "plan" });
+        if (id) return send(200, { id, entity: "subscription", status: "cancelled" });
+        return send(200, { id: `sub_E2E${n}`, entity: "subscription", status: "created", short_url: "https://rzp.io/i/e2e" });
+      }
       // OpenAI-compatible and Ollama chat endpoints.
       if (req.url?.startsWith("/v1/chat/completions") || req.url?.startsWith("/api/chat")) {
         const aiBody = body as unknown as AiCall["body"];

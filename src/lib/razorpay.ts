@@ -10,7 +10,12 @@ export function razorpay(): Razorpay {
   if (!key_id || !key_secret) {
     throw new Error("Razorpay keys missing. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in .env");
   }
-  if (!client) client = new Razorpay({ key_id, key_secret });
+  if (!client) {
+    client = new Razorpay({ key_id, key_secret });
+    // Overridable so tests can point at a local stand-in for the Razorpay API.
+    const base = process.env.RAZORPAY_API_BASE;
+    if (base) (client as unknown as { api: { rq: { defaults: { baseURL: string } } } }).api.rq.defaults.baseURL = base.replace(/\/$/, "");
+  }
   return client;
 }
 
