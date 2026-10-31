@@ -26,7 +26,7 @@ type Invoice = {
 type Summary = { count: number; total: number; paid: number };
 type Line = { name: string; price: string; qty: string };
 
-const METHOD_LABEL: Record<string, string> = { razorpay: "Online", cod: "Cash on Delivery", manual: "Manual" };
+const METHOD_LABEL: Record<string, string> = { razorpay: "Online", cashfree: "Online", cod: "Cash on Delivery", manual: "Manual" };
 const STATUS_LABEL: Record<string, string> = { PAID: "Paid", UNPAID: "Pending", FAILED: "Failed" };
 const STATUS_CLS: Record<string, string> = {
   PAID: "bg-forest/10 text-forest",

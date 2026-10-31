@@ -2,7 +2,7 @@ import { NextResponse, after } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
-import { razorpay } from "@/lib/razorpay";
+import { activeGateway, startOnlinePayment } from "@/lib/payments";
 import { effectivePrice } from "@/lib/pricing";
 import { finalizeOrder, OutOfStockError } from "@/lib/fulfillment";
 import { notifyOrderStatus, notifyNewOrderToAdmin } from "@/lib/notify";
@@ -21,7 +21,8 @@ const bodySchema = z.object({
   couponCode: z.string().trim().max(40).optional(),
   deliveryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
   deliverySlotId: z.string().trim().min(1).optional(),
-  paymentMethod: z.enum(["razorpay", "cod"]).default("razorpay"),
+  // "razorpay" is what older checkout pages send for "pay online".
+  paymentMethod: z.enum(["online", "razorpay", "cod"]).default("online"),
 });
 
 // GET /api/orders — customer: own orders; staff/admin: all orders.
@@ -83,7 +84,8 @@ export async function POST(req: Request) {
   if (!parsed.success) {
     return NextResponse.json({ error: "Invalid order details" }, { status: 400 });
   }
-  const { items, name, phone, deliveryLocationId, couponCode, deliveryDate, deliverySlotId, paymentMethod } = parsed.data;
+  const { items, name, phone, deliveryLocationId, couponCode, deliveryDate, deliverySlotId } = parsed.data;
+  const paymentMethod = parsed.data.paymentMethod === "cod" ? "cod" : "online";
 
   // COD availability is an admin setting — enforce it here, not just in the UI.
   if (paymentMethod === "cod" && setting && !setting.codEnabled) {
@@ -170,6 +172,15 @@ export async function POST(req: Request) {
   const codBalanceDue = paymentMethod === "cod" ? total - codConfirmAmount : 0;
   const collectsCodConfirmation = codConfirmAmount > 0;
 
+  // Online money goes through the gateway chosen in Settings → Payments.
+  const gateway = paymentMethod === "online" || collectsCodConfirmation ? await activeGateway() : null;
+  if ((paymentMethod === "online" || collectsCodConfirmation) && !gateway) {
+    return NextResponse.json(
+      { error: paymentMethod === "cod" ? "Cash on Delivery needs a small online confirmation payment, which isn't available right now." : "Online payment isn't available right now. Please choose Cash on Delivery or try again later." },
+      { status: 503 },
+    );
+  }
+
   const created = await prisma.order.create({
     data: {
       customerId: s.sub,
@@ -186,7 +197,8 @@ export async function POST(req: Request) {
       membershipDiscount,
       deliveryFee,
       total,
-      paymentMethod,
+      // The gateway that takes the money is recorded as the method (razorpay | cashfree).
+      paymentMethod: paymentMethod === "cod" ? "cod" : gateway!,
       codBalanceDue,
       status: paymentMethod === "cod" && !collectsCodConfirmation ? "PLACED" : "PENDING",
       paymentStatus: "UNPAID",
@@ -205,8 +217,8 @@ export async function POST(req: Request) {
     action: "order.created",
     entityType: "order",
     entityId: created.id,
-    summary: `Order placed (₹${total}, ${paymentMethod})`,
-    metadata: { total, subtotal, discountTotal, couponCode: appliedCode, couponDiscount, deliveryFee, location: location.name, deliveryDate: deliveryDate ?? null, paymentMethod, items: lineItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) },
+    summary: `Order placed (₹${total}, ${created.paymentMethod})`,
+    metadata: { total, subtotal, discountTotal, couponCode: appliedCode, couponDiscount, deliveryFee, location: location.name, deliveryDate: deliveryDate ?? null, paymentMethod: created.paymentMethod, items: lineItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) },
     req,
   });
 
@@ -234,36 +246,26 @@ export async function POST(req: Request) {
     }
   }
 
-  // Online payment — full total, or just the COD confirmation slice (amount in paise).
-  const chargeNow = collectsCodConfirmation ? codConfirmAmount : total;
+  // Online payment — full total, or just the COD confirmation slice.
   try {
-    const rp = await razorpay().orders.create({
-      amount: chargeNow * 100,
-      currency: "INR",
-      receipt: created.id,
-      notes: { orderId: created.id, customer: phone, kind: collectsCodConfirmation ? "cod-confirmation" : "full" },
-    });
-
-    await prisma.order.update({ where: { id: created.id }, data: { razorpayOrderId: rp.id } });
-
+    const start = await startOnlinePayment(created, gateway!, new URL(req.url).origin);
     return NextResponse.json({
       order: created,
-      paymentMethod: collectsCodConfirmation ? "cod_confirm" : "razorpay",
+      paymentMethod: collectsCodConfirmation ? "cod_confirm" : start.gateway,
+      gateway: start.gateway,
       codConfirmAmount,
       codBalanceDue,
-      razorpay: {
-        orderId: rp.id,
-        amount: rp.amount,
-        currency: rp.currency,
-        keyId: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
-      },
+      ...(start.gateway === "razorpay" ? { razorpay: start.razorpay } : { cashfree: start.cashfree }),
     });
   } catch (e) {
-    const msg = String((e as { error?: { description?: string } })?.error?.description || e);
-    const authError = /authentication|unauthorized|key_id|invalid api key/i.test(msg);
+    const msg = String((e as { error?: { description?: string } })?.error?.description || (e as Error)?.message || e);
+    const authError = /authentication|unauthori[sz]ed|key_id|invalid api key|client id|client secret/i.test(msg) || (e as { status?: number })?.status === 401;
     await prisma.order.delete({ where: { id: created.id } }).catch(() => {});
+    if (appliedCode) {
+      await prisma.coupon.update({ where: { code: appliedCode }, data: { usedCount: { decrement: 1 } } }).catch(() => {});
+    }
     // eslint-disable-next-line no-console
-    console.error("[Razorpay] create order failed:", msg);
+    console.error(`[${gateway}] create payment failed:`, msg);
     return NextResponse.json(
       { error: authError ? "Payment gateway auth failed." : "Could not start payment. Try again." },
       { status: authError ? 401 : 500 },

@@ -13,14 +13,15 @@ export async function GET(req: Request) {
 
   const { searchParams } = new URL(req.url);
   const status = searchParams.get("status") || ""; // PAID | UNPAID | FAILED
-  const method = searchParams.get("method") || ""; // razorpay | cod | manual
+  const method = searchParams.get("method") || ""; // razorpay (= any online gateway) | cashfree | cod | manual
   const q = (searchParams.get("q") || "").trim();
   const from = searchParams.get("from");
   const to = searchParams.get("to");
 
   const where: Prisma.OrderWhereInput = { invoiceNo: { not: null } };
   if (status) where.paymentStatus = status as Prisma.OrderWhereInput["paymentStatus"];
-  if (method) where.paymentMethod = method;
+  // "Online" covers both gateways: orders record the one that took the money.
+  if (method) where.paymentMethod = method === "razorpay" ? { in: ["razorpay", "cashfree"] } : method;
   if (from || to) {
     where.createdAt = {};
     if (from) (where.createdAt as Prisma.DateTimeFilter).gte = new Date(from);

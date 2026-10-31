@@ -149,6 +149,42 @@ type AiCall = { url: string; body: { model?: string; messages?: { role: string; 
 const ai = { calls: [] as AiCall[], mode: "ok" as "ok" | "fail" };
 let rzpSeq = 1;
 
+/** Stand-in for Cashfree PG: orders, payments and refunds, checked against the e2e keys. */
+type CfOrder = {
+  order_id: string;
+  order_amount: number;
+  order_currency: string;
+  customer_details: { customer_id: string; customer_phone: string; customer_name?: string };
+  order_meta: { return_url: string; notify_url?: string };
+  order_tags?: Record<string, string>;
+  cf_order_id: string;
+  order_status: string;
+  payment_session_id: string;
+  payments: { cf_payment_id: number; payment_status: string; payment_amount: number }[];
+};
+const CF_APP = "e2e-cf-app";
+const CF_SECRET = process.env.E2E_CASHFREE_SECRET || "e2e-cf-secret";
+const cf = {
+  orders: new Map<string, CfOrder>(),
+  refunds: [] as { orderId: string; refund_id?: string; refund_amount?: number; refund_status: string }[],
+  versions: new Set<string>(),
+  next: 1,
+  refundMode: "SUCCESS" as "SUCCESS" | "PENDING",
+};
+const cfPublic = (o: CfOrder) => Object.fromEntries(Object.entries(o).filter(([k]) => k !== "payments"));
+/** The customer pays (or fails to pay) on Cashfree's page. */
+function cfPay(cfOrderId: string, status = "SUCCESS", amount?: number) {
+  const o = cf.orders.get(cfOrderId);
+  if (!o) throw new Error(`no Cashfree order ${cfOrderId}`);
+  o.payments.unshift({ cf_payment_id: 880000 + cf.next++, payment_status: status, payment_amount: amount ?? o.order_amount });
+  if (status === "SUCCESS") o.order_status = "PAID";
+  return o.payments[0];
+}
+/** Signs a webhook body the way Cashfree does: base64 HMAC-SHA256 of timestamp + body. */
+function cfSign(ts: string, raw: string) {
+  return crypto.createHmac("sha256", CF_SECRET).update(ts + raw).digest("base64");
+}
+
 /** Scripted model: hands off on "refund", otherwise answers normally (so the keyword safety net can be tested). */
 function fakeAiAnswer(body: AiCall["body"]): string {
   const lastUser = [...(body.messages ?? [])].reverse().find((m) => m.role === "user")?.content ?? "";
@@ -172,6 +208,32 @@ function startFakeWhatsApp(port = 4010): Promise<http.Server> {
         res.writeHead(status, { "content-type": "application/json" });
         res.end(JSON.stringify(obj));
       };
+      // Cashfree PG — the app is started with CASHFREE_API_BASE pointing here.
+      if (req.url?.startsWith("/pg/")) {
+        cf.versions.add(String(req.headers["x-api-version"] || ""));
+        if (req.headers["x-client-id"] !== CF_APP || req.headers["x-client-secret"] !== CF_SECRET) {
+          return send(401, { message: "authentication Failed", code: "request_failed", type: "authentication_error" });
+        }
+        const m = req.url.match(/^\/pg\/orders(?:\/([^/?]+))?(?:\/(payments|refunds))?/);
+        if (!m) return send(404, { message: "not found" });
+        const [, id, sub] = m;
+        if (req.method === "POST" && !id) {
+          const b = body as unknown as CfOrder;
+          if (cf.orders.has(b.order_id)) return send(409, { message: "order with same id is already present", code: "order_already_exists", type: "invalid_request_error" });
+          const o: CfOrder = { ...b, cf_order_id: String(cf.next++), order_status: "ACTIVE", payment_session_id: `session_${b.order_id}_${crypto.randomBytes(4).toString("hex")}`, payments: [] };
+          cf.orders.set(b.order_id, o);
+          return send(200, cfPublic(o));
+        }
+        const o = id ? cf.orders.get(decodeURIComponent(id)) : undefined;
+        if (!o) return send(404, { message: "order not found", code: "order_not_found" });
+        if (sub === "payments") return send(200, o.payments);
+        if (sub === "refunds" && req.method === "POST") {
+          const r = { ...(body as unknown as { refund_id?: string; refund_amount?: number }), refund_status: cf.refundMode, cf_refund_id: String(cf.next++) };
+          cf.refunds.push({ orderId: o.order_id, ...r });
+          return send(200, r);
+        }
+        return send(200, cfPublic(o));
+      }
       // Razorpay REST API (orders, plans, subscriptions) — the app is started
       // with RAZORPAY_API_BASE pointing here, so tests never need live keys.
       const rzp = req.url?.match(/^\/v1\/(orders|plans|subscriptions)(?:\/([^/?]+)\/(cancel))?/);
@@ -322,6 +384,8 @@ async function main() {
   ok(alRes.status === 200, "admin login → 200");
   const me = await (await admin.fetch("/api/auth/me")).json();
   ok(me.user?.role === "admin", "session role = admin");
+  const gwRzp = await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "RAZORPAY" }) });
+  ok(gwRzp.status === 200 && (await gwRzp.json()).payments?.active === "razorpay", "admin picks the online payment gateway (Razorpay for the first checks)");
 
   const anonMenu = await new Client().fetch("/api/menu", { method: "POST", body: JSON.stringify({ name: "x", price: 100 }) });
   ok(anonMenu.status === 403, "anonymous POST /api/menu → 403");
@@ -1707,6 +1771,150 @@ async function main() {
   ok(aiAudit.total > 0 && !JSON.stringify(aiAudit.logs).includes(aiKey), "AI settings changes are audited without the key");
   const hand = await (await admin.fetch("/api/admin/audit?action=whatsapp.takeover&limit=1")).json();
   ok(hand.total > 0, "takeovers are audited");
+
+  // ---------- Payments: Cashfree, payment links, webhooks, refunds ----------
+  section("Payments: Cashfree checkout, payment links, webhooks and refunds");
+  const paySet = await (await admin.fetch("/api/admin/settings")).json();
+  ok(paySet.payments?.cashfree?.configured === true && paySet.payments.cashfree.mode === "sandbox" && paySet.payments.razorpay.configured === true, "Settings shows both gateways and Cashfree's test mode");
+  ok(!JSON.stringify(paySet).includes(CF_SECRET), "the Cashfree secret key is never sent to the browser");
+  ok((await kitchen.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "CASHFREE" }) })).status === 403, "only admins choose the gateway → 403");
+  ok((await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "PAYPAL" }) })).status === 400, "an unknown gateway is rejected");
+  const toCf = await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "CASHFREE" }) });
+  ok(toCf.status === 200 && (await toCf.json()).payments.active === "cashfree", "admin switches online payments to Cashfree");
+  const pubPay = await waitFor(async () => {
+    const j = await (await new Client().fetch("/api/settings")).json();
+    return j.onlineGateway === "cashfree" ? j : null;
+  });
+  ok(pubPay?.onlineGatewayLabel === "Cashfree", "checkout names Cashfree as the payment partner");
+
+  const stockOf = async (id: string) => ((await (await admin.fetch("/api/menu?all=1")).json()).items as { id: string; stock: number | null }[]).find((m) => m.id === id)?.stock ?? null;
+  const cfDish = menu[1];
+  const stockBeforeCf = await stockOf(cfDish.id);
+  const placeOnline = async (qty = 1, method = "online") =>
+    (await (
+      await customer.fetch("/api/orders", {
+        method: "POST",
+        body: JSON.stringify({ items: [{ id: cfDish.id, qty }], name: "E2E Customer", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: method }),
+      })
+    ).json()) as { order: { id: string; total: number; status: string; paymentMethod: string; codBalanceDue: number }; gateway: string; paymentMethod: string; cashfree: { paymentSessionId: string; mode: string; orderId: string } };
+  const cfOne = await placeOnline(2);
+  ok(cfOne.gateway === "cashfree" && !!cfOne.cashfree?.paymentSessionId && cfOne.cashfree.mode === "sandbox", "online checkout opens a Cashfree payment session");
+  const cfo1 = cf.orders.get(cfOne.cashfree.orderId);
+  ok(
+    !!cfo1 && cfo1.order_amount === cfOne.order.total && cfo1.customer_details.customer_phone === phone && cfo1.order_meta.return_url.includes(`/pay/${cfOne.order.id}?k=`),
+    "Cashfree is asked for exactly the order total, with a 10-digit phone and a return link",
+  );
+  ok(cf.versions.has("2026-01-01"), "requests use Cashfree API version 2026-01-01");
+  ok(cfOne.order.status === "PENDING" && cfOne.order.paymentMethod === "cashfree", "the order waits for payment, recorded as a Cashfree order");
+  const cfVerify = async (orderId: string) => (await (await customer.fetch("/api/payments/cashfree/verify", { method: "POST", body: JSON.stringify({ orderId }) })).json()) as { paid: boolean; alreadyVerified?: boolean; status?: string; order?: { paymentStatus: string; status: string; invoiceNo: string | null; codBalanceDue: number } };
+  ok((await cfVerify(cfOne.order.id)).paid === false, "closing the payment window without paying does not mark the order paid");
+  ok((await new Client().fetch("/api/payments/cashfree/verify", { method: "POST", body: JSON.stringify({ orderId: cfOne.order.id }) })).status === 401, "payment checks need the customer's login → 401");
+
+  cfPay(cfOne.cashfree.orderId);
+  const waBeforeCf = wa.calls.length;
+  const paidOne = await cfVerify(cfOne.order.id);
+  ok(paidOne.paid === true && paidOne.order?.paymentStatus === "PAID" && paidOne.order.status === "PLACED" && /^ELA-/.test(paidOne.order.invoiceNo || ""), "once Cashfree says PAID, the order is paid and confirmed with an invoice");
+  const refOne = cfOne.order.id.slice(-6).toUpperCase();
+  ok(!!(await waitFor(async () => wa.calls.slice(waBeforeCf).some((c) => c.body.to === "91" + phone && JSON.stringify(c.body).includes(refOne)))), "the customer gets the WhatsApp order confirmation");
+  ok((await stockOf(cfDish.id)) === (stockBeforeCf === null ? null : stockBeforeCf - 2), "stock is reserved when the payment is confirmed");
+  const againOne = await cfVerify(cfOne.order.id);
+  await sleep(400);
+  ok(againOne.paid === true && againOne.alreadyVerified === true && wa.calls.slice(waBeforeCf).filter((c) => JSON.stringify(c.body).includes(refOne)).length === 1, "a repeated check changes nothing and sends nothing twice");
+
+  // Signed webhooks: Cashfree's server-to-server confirmation.
+  const cfHook = (payload: unknown, opts: { sig?: string; ts?: string } = {}) => {
+    const raw = JSON.stringify(payload);
+    const ts = opts.ts ?? String(Math.floor(Date.now() / 1000));
+    return new Client().fetch("/api/webhooks/cashfree", { method: "POST", body: raw, headers: { "x-webhook-timestamp": ts, "x-webhook-signature": opts.sig ?? cfSign(ts, raw) } });
+  };
+  const successEvent = (cfOrderId: string, ourId: string, amount: number, paymentId = 990000 + Math.floor(Math.random() * 9999)) => ({
+    type: "PAYMENT_SUCCESS_WEBHOOK",
+    event_time: new Date().toISOString(),
+    data: {
+      order: { order_id: cfOrderId, order_amount: amount, order_currency: "INR", order_tags: { ela_order: ourId } },
+      payment: { cf_payment_id: paymentId, payment_status: "SUCCESS", payment_amount: amount, payment_currency: "INR" },
+    },
+  });
+  const cfTwo = await placeOnline(1);
+  ok((await cfHook(successEvent(cfTwo.cashfree.orderId, cfTwo.order.id, cfTwo.order.total), { sig: "forged" })).status === 401, "a forged Cashfree webhook is rejected → 401");
+  const unsignedHook = await new Client().fetch("/api/webhooks/cashfree", { method: "POST", body: JSON.stringify(successEvent(cfTwo.cashfree.orderId, cfTwo.order.id, cfTwo.order.total)) });
+  ok(unsignedHook.status === 401, "an unsigned Cashfree webhook is rejected → 401");
+  const shortHook = await cfHook(successEvent(cfTwo.cashfree.orderId, cfTwo.order.id, cfTwo.order.total - 10));
+  const orderNow = async (id: string) => ((await (await customer.fetch(`/api/orders/${id}`)).json()).order ?? {}) as { paymentStatus: string; status: string; refundStatus?: string | null };
+  ok(shortHook.status === 200 && (await orderNow(cfTwo.order.id)).paymentStatus === "UNPAID", "a payment for less than the order total never marks it paid");
+  const mismatch = await (await admin.fetch("/api/admin/audit?action=order.payment_mismatch&limit=5")).json();
+  ok(mismatch.total > 0, "…and the mismatch is flagged in the audit log");
+  await cfHook({ type: "PAYMENT_FAILED_WEBHOOK", data: { order: { order_id: cfTwo.cashfree.orderId, order_tags: { ela_order: cfTwo.order.id } }, payment: { cf_payment_id: 1, payment_status: "FAILED", payment_message: "Insufficient funds" } } });
+  ok((await orderNow(cfTwo.order.id)).paymentStatus === "FAILED", "a failed attempt is recorded (the customer can still retry)");
+  const waBeforeHook = wa.calls.length;
+  const goodHook = await cfHook(successEvent(cfTwo.cashfree.orderId, cfTwo.order.id, cfTwo.order.total, 777001));
+  ok(goodHook.status === 200 && (await orderNow(cfTwo.order.id)).paymentStatus === "PAID", "a signed success webhook confirms the payment on its own");
+  await cfHook(successEvent(cfTwo.cashfree.orderId, cfTwo.order.id, cfTwo.order.total, 777001));
+  await sleep(500);
+  const refTwo = cfTwo.order.id.slice(-6).toUpperCase();
+  ok(wa.calls.slice(waBeforeHook).filter((c) => JSON.stringify(c.body).includes(refTwo)).length === 1, "a redelivered webhook is applied once — one confirmation message");
+
+  // The payment link (/pay/<order>?k=…) — what WhatsApp customers open.
+  const cfThree = await placeOnline(1);
+  const link = (await (await admin.fetch(`/api/admin/orders/${cfThree.order.id}/payment`)).json()) as { link: string; amountDue: number };
+  ok(link.link?.includes(`/pay/${cfThree.order.id}?k=`) && link.amountDue === cfThree.order.total, "staff can copy an order's payment link");
+  const key = new URL(link.link).searchParams.get("k")!;
+  const badPage = await (await new Client().fetch(`/pay/${cfThree.order.id}?k=wrong`)).text();
+  ok(badPage.includes("payment link isn") && !badPage.includes(refTwo), "a payment link with the wrong key shows nothing about the order");
+  const payPage = await (await new Client().fetch(`/pay/${cfThree.order.id}?k=${key}`)).text();
+  ok(payPage.includes(`#${cfThree.order.id.slice(-6).toUpperCase()}`) && payPage.includes(`data-pay-amount="${cfThree.order.total}"`), "the payment link shows the order summary and a Pay button");
+  ok((await new Client().fetch(`/api/pay/${cfThree.order.id}`, { method: "POST", body: JSON.stringify({ k: "wrong" }) })).status === 403, "starting a payment needs the link's key → 403");
+  const startPay = await (await new Client().fetch(`/api/pay/${cfThree.order.id}`, { method: "POST", body: JSON.stringify({ k: key }) })).json();
+  ok(startPay.gateway === "cashfree" && startPay.cashfree.paymentSessionId === cfThree.cashfree.paymentSessionId && startPay.amount === cfThree.order.total, "the link reuses the open Cashfree payment for the same amount (no double charge)");
+  cfPay(cfThree.cashfree.orderId);
+  const paidPage = await (await new Client().fetch(`/pay/${cfThree.order.id}?k=${key}`)).text();
+  ok(paidPage.includes("Payment received") && (await orderNow(cfThree.order.id)).paymentStatus === "PAID", "returning from Cashfree, the page checks Cashfree itself and confirms the order");
+  const afterPaid = await new Client().fetch(`/api/pay/${cfThree.order.id}`, { method: "POST", body: JSON.stringify({ k: key }) });
+  ok(afterPaid.status === 409 && (await afterPaid.json()).paid === true, "a paid order can't be paid again from its link");
+
+  // An expired attempt gets a fresh Cashfree order; the old one can't be reused.
+  const cfFour = await placeOnline(1);
+  cf.orders.get(cfFour.cashfree.orderId)!.order_status = "EXPIRED";
+  const k4 = new URL(((await (await admin.fetch(`/api/admin/orders/${cfFour.order.id}/payment`)).json()) as { link: string }).link).searchParams.get("k")!;
+  const retry = await (await new Client().fetch(`/api/pay/${cfFour.order.id}`, { method: "POST", body: JSON.stringify({ k: k4 }) })).json();
+  ok(retry.cashfree?.orderId === `${cfFour.order.id}-2`, "a retry after the first attempt expired opens attempt -2");
+  cfPay(retry.cashfree.orderId);
+  const confirmed = await (await new Client().fetch(`/api/pay/${cfFour.order.id}/confirm`, { method: "POST", body: JSON.stringify({ k: k4 }) })).json();
+  ok(confirmed.paid === true && (await orderNow(cfFour.order.id)).paymentStatus === "PAID", "…and paying it confirms the order");
+  const checkPaid = await (await admin.fetch(`/api/admin/orders/${cfFour.order.id}/payment`, { method: "POST" })).json();
+  ok(checkPaid.paid === true, "staff 'Check payment' agrees with the gateway");
+
+  // COD confirmation amount through Cashfree.
+  await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ codEnabled: true, codConfirmAmount: 40 }) });
+  const codCf = await placeOnline(1, "cod");
+  ok(codCf.paymentMethod === "cod_confirm" && cf.orders.get(codCf.cashfree.orderId)?.order_amount === 40, "COD confirmation charges exactly ₹40 through Cashfree");
+  cfPay(codCf.cashfree.orderId);
+  const codPaid = await cfVerify(codCf.order.id);
+  ok(codPaid.paid === true && codPaid.order?.paymentStatus === "PARTIAL" && codPaid.order.codBalanceDue === codCf.order.total - 40, "…then the order is confirmed with the rest due in cash (PARTIAL)");
+  await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ codConfirmAmount: 0 }) });
+
+  // Refunds (spec #12).
+  ok((await kitchen.fetch(`/api/admin/orders/${cfOne.order.id}/refund`, { method: "POST", body: JSON.stringify({}) })).status === 403, "only admins can refund → 403");
+  ok((await admin.fetch(`/api/admin/orders/${cfFour.order.id}-x/refund`, { method: "POST", body: JSON.stringify({}) })).status === 404, "refunding an unknown order → 404");
+  const ref1 = await admin.fetch(`/api/admin/orders/${cfOne.order.id}/refund`, { method: "POST", body: JSON.stringify({ cancel: true, note: "Customer cancelled" }) });
+  const ref1j = await ref1.json();
+  ok(ref1.status === 200 && ref1j.order.paymentStatus === "REFUNDED" && ref1j.order.status === "CANCELLED", "admin cancels and refunds a paid order through Cashfree");
+  ok(cf.refunds.some((r) => r.orderId === cfOne.cashfree.orderId && r.refund_amount === cfOne.order.total && r.refund_id === `rf-${cfOne.order.id}`), "Cashfree is asked to refund exactly what was paid, once per order");
+  ok((await admin.fetch(`/api/admin/orders/${cfOne.order.id}/refund`, { method: "POST", body: JSON.stringify({}) })).status === 409, "the same order can't be refunded twice → 409");
+  ok((await admin.fetch(`/api/admin/orders/${cfFour.order.id}-0/refund`, { method: "POST", body: JSON.stringify({}) })).status === 404, "…and unknown orders are refused");
+  cf.refundMode = "PENDING";
+  const ref2 = await (await admin.fetch(`/api/admin/orders/${cfTwo.order.id}/refund`, { method: "POST", body: JSON.stringify({}) })).json();
+  ok(ref2.order?.refundStatus === "PENDING" && ref2.order.paymentStatus === "PAID", "a refund Cashfree is still processing shows as in progress");
+  await cfHook({ type: "REFUND_STATUS_WEBHOOK", data: { refund: { refund_id: `rf-${cfTwo.order.id}`, order_id: cfTwo.cashfree.orderId, refund_status: "SUCCESS" } } });
+  ok((await orderNow(cfTwo.order.id)).paymentStatus === "REFUNDED", "…and Cashfree's refund webhook completes it");
+  cf.refundMode = "SUCCESS";
+  const manualRef = await (await admin.fetch(`/api/admin/orders/${codCf.order.id}/refund`, { method: "POST", body: JSON.stringify({ manual: true, note: "Paid back in cash" }) })).json();
+  ok(manualRef.order?.paymentStatus === "REFUNDED" && manualRef.order.refundStatus === "MANUAL", "a refund made outside the system can be recorded");
+  const refundAudit = await (await admin.fetch("/api/admin/audit?action=order.refunded&limit=5")).json();
+  ok(refundAudit.total >= 2, "refunds are in the audit log");
+
+  // Back to Razorpay for the rest of the run.
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "RAZORPAY" }) });
 
   // ---------- Concurrency: no overselling ----------
   section("Stock safety under concurrent orders");

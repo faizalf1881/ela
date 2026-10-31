@@ -25,6 +25,10 @@ import {
   Info,
   MessageCircle,
   RotateCw,
+  Link2,
+  Undo2,
+  SearchCheck,
+  Loader2,
 } from "lucide-react";
 import { inr } from "@/lib/utils";
 import { downloadCsv } from "@/lib/export";
@@ -60,6 +64,16 @@ const ADVANCE: Partial<Record<OrderStatus, { next: OrderStatus; label: string }>
 
 function minutesSince(iso: string) {
   return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
+}
+
+/** How the order stands for money, in a word or two. */
+function paymentText(o: OrderDTO): { text: string; cls: string } {
+  if (o.paymentStatus === "REFUNDED") return { text: `Refunded${o.refundAmount ? ` ${inr(o.refundAmount)}` : ""}`, cls: "text-muted-foreground" };
+  if (o.refundStatus === "PENDING" || o.refundStatus === "REQUESTED") return { text: "Refund in progress", cls: "text-[oklch(0.55_0.12_75)]" };
+  if (o.paymentMethod === "cod") return { text: o.paymentStatus === "PARTIAL" ? `COD · ${inr(o.codBalanceDue ?? 0)} due` : "COD", cls: "text-muted-foreground" };
+  if (o.paymentStatus === "PAID") return { text: "Paid online", cls: "text-green-600" };
+  if (o.paymentStatus === "FAILED") return { text: "Payment failed", cls: "text-destructive" };
+  return { text: "Awaiting payment", cls: "text-muted-foreground" };
 }
 
 export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
@@ -416,11 +430,10 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
                   )}
                   <div className="flex items-center justify-between pt-1">
                     <span className="font-serif text-base text-foreground">{inr(o.total)}</span>
-                    <span className={`text-xs ${o.paymentStatus === "PAID" ? "text-green-600" : "text-muted-foreground"}`}>
-                      {o.paymentMethod === "cod" ? "COD" : o.paymentStatus === "PAID" ? "Paid online" : "Unpaid"}
-                    </span>
+                    <span className={`text-xs ${paymentText(o).cls}`}>{paymentText(o).text}</span>
                   </div>
                   {o.notifications?.[0] && <WhatsAppUpdate n={o.notifications[0]} onRetried={load} />}
+                  {showStats && <PaymentActions o={o} onChanged={load} />}
                 </div>
 
                 {/* Primary one-tap action + override */}
@@ -506,6 +519,118 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Admin money actions on an order card: the payment link of an order still
+ * waiting to be paid (copy it, or ask the gateway whether it was paid after
+ * all), and refunds of a paid one (spec #11/#12).
+ */
+function PaymentActions({ o, onChanged }: { o: OrderDTO; onChanged: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [refunding, setRefunding] = useState(false);
+  const [cancelToo, setCancelToo] = useState(o.status !== "DELIVERED" && o.status !== "CANCELLED");
+  const onlineDue = o.paymentMethod === "cod" ? o.total - (o.codBalanceDue ?? 0) : o.total;
+  const awaiting =
+    (o.paymentStatus === "UNPAID" || o.paymentStatus === "FAILED") && o.status !== "CANCELLED" && onlineDue > 0 && o.paymentMethod !== "manual" && o.source !== "subscription";
+  const paidOnline = o.paymentStatus === "PAID" || o.paymentStatus === "PARTIAL";
+  const refundable = paidOnline && (!o.refundStatus || o.refundStatus === "FAILED");
+  const viaGateway = !!(o.cashfreePaymentId || o.razorpayPaymentId);
+  const amount = o.paymentStatus === "PARTIAL" ? (o.codConfirmPaid ?? onlineDue) : onlineDue;
+  if (!awaiting && !refundable) return null;
+
+  async function run(key: string, fn: () => Promise<void>) {
+    setBusy(key);
+    try {
+      await fn();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Something went wrong");
+    } finally {
+      setBusy(null);
+    }
+  }
+  const copyLink = () =>
+    run("link", async () => {
+      const d = await (await fetch(`/api/admin/orders/${o.id}/payment`, { cache: "no-store" })).json();
+      if (!d.link) throw new Error(d.error || "No payment link");
+      await navigator.clipboard?.writeText(d.link).catch(() => {});
+      toast.success("Payment link copied", { description: d.link });
+    });
+  const check = () =>
+    run("check", async () => {
+      const res = await fetch(`/api/admin/orders/${o.id}/payment`, { method: "POST" });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || "Could not check");
+      if (d.paid) {
+        toast.success("Paid — the order is now confirmed");
+        onChanged();
+      } else {
+        toast.message(d.status === "CHECK_DASHBOARD" ? "Check the Razorpay dashboard for this order" : d.status === "FAILED" ? "The last payment attempt failed" : "Not paid yet");
+      }
+    });
+  const refund = (manual: boolean) =>
+    run(manual ? "manual" : "refund", async () => {
+      const res = await fetch(`/api/admin/orders/${o.id}/refund`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ manual, cancel: cancelToo }),
+      });
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || "Refund failed");
+      toast.success(manual ? "Refund recorded" : d.order?.paymentStatus === "REFUNDED" ? `${inr(amount)} refunded` : "Refund started — the gateway confirms it shortly");
+      setRefunding(false);
+      onChanged();
+    });
+
+  return (
+    <div className="pt-1">
+      {awaiting && (
+        <div className="flex flex-wrap gap-1.5">
+          <button onClick={copyLink} disabled={busy !== null} className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs hover:bg-muted disabled:opacity-60">
+            {busy === "link" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Link2 className="h-3 w-3" />} Copy payment link
+          </button>
+          <button onClick={check} disabled={busy !== null} className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs hover:bg-muted disabled:opacity-60">
+            {busy === "check" ? <Loader2 className="h-3 w-3 animate-spin" /> : <SearchCheck className="h-3 w-3" />} Check payment
+          </button>
+        </div>
+      )}
+      {refundable &&
+        (refunding ? (
+          <div className="mt-1 space-y-2 rounded-xl border border-destructive/30 bg-destructive/5 p-2.5 text-xs">
+            <div className="text-foreground">
+              Refund <strong>{inr(amount)}</strong>{" "}
+              {viaGateway ? `to the customer through ${o.cashfreePaymentId ? "Cashfree" : "Razorpay"}?` : "— this order wasn't paid through a gateway, so record a refund you made yourself."}
+            </div>
+            {o.status !== "DELIVERED" && o.status !== "CANCELLED" && (
+              <label className="flex items-center gap-1.5 text-foreground">
+                <input type="checkbox" checked={cancelToo} onChange={(e) => setCancelToo(e.target.checked)} /> Also cancel the order (the customer is told on WhatsApp)
+              </label>
+            )}
+            <div className="flex flex-wrap gap-1.5">
+              {viaGateway && (
+                <button
+                  onClick={() => refund(false)}
+                  disabled={busy !== null}
+                  className="inline-flex items-center gap-1 rounded-full bg-destructive px-3 py-1.5 font-medium text-destructive-foreground disabled:opacity-60"
+                >
+                  {busy === "refund" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Undo2 className="h-3 w-3" />} Refund now
+                </button>
+              )}
+              <button onClick={() => refund(true)} disabled={busy !== null} className="inline-flex items-center gap-1 rounded-full border border-border px-3 py-1.5 hover:bg-muted disabled:opacity-60">
+                {busy === "manual" ? <Loader2 className="h-3 w-3 animate-spin" /> : null} Already refunded — record it
+              </button>
+              <button onClick={() => setRefunding(false)} className="rounded-full px-3 py-1.5 text-muted-foreground hover:bg-muted">
+                Keep
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button onClick={() => setRefunding(true)} className="inline-flex items-center gap-1 rounded-full border border-border px-2.5 py-1 text-xs text-destructive hover:bg-destructive/10">
+            <Undo2 className="h-3 w-3" /> Refund{o.refundStatus === "FAILED" ? " (last attempt failed)" : ""}…
+          </button>
+        ))}
     </div>
   );
 }

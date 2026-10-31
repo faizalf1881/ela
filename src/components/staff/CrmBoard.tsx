@@ -15,7 +15,7 @@ type OrderLite = {
   createdAt: string;
   total: number;
   paymentMethod: string;
-  paymentStatus: "PAID" | "UNPAID" | "FAILED";
+  paymentStatus: "PAID" | "PARTIAL" | "UNPAID" | "FAILED" | "REFUNDED";
   status: OrderStatus;
 };
 
@@ -42,7 +42,7 @@ type Customer = {
   subscriptionPayments: { id: string; amount: number; paidAt: string }[];
 };
 
-const METHOD_LABEL: Record<string, string> = { razorpay: "Online", cod: "Cash", manual: "Manual" };
+const METHOD_LABEL: Record<string, string> = { razorpay: "Online", cashfree: "Online", cod: "Cash", manual: "Manual" };
 const fmt = (d: string | null) => (d ? new Date(d).toLocaleString("en-IN") : "—");
 const fmtDate = (d: string | null) => (d ? new Date(d).toLocaleDateString("en-IN") : "—");
 
@@ -263,7 +263,7 @@ function CustomerDetail({ customer, onClose, onSaved }: { customer: Customer; on
                     </div>
                     <div className="text-right">
                       <div className="font-medium text-foreground">{inr(o.total)}</div>
-                      <div className="text-xs text-muted-foreground">{METHOD_LABEL[o.paymentMethod] || o.paymentMethod} · {o.paymentStatus === "PAID" ? "Paid" : o.paymentStatus === "FAILED" ? "Failed" : "Pending"}</div>
+                      <div className="text-xs text-muted-foreground">{METHOD_LABEL[o.paymentMethod] || o.paymentMethod} · {o.paymentStatus === "PAID" ? "Paid" : o.paymentStatus === "REFUNDED" ? "Refunded" : o.paymentStatus === "FAILED" ? "Failed" : "Pending"}</div>
                     </div>
                     {o.invoiceNo && (
                       <Link href={`/orders/${o.id}/invoice`} target="_blank" className="rounded-full border border-border px-3 py-1.5 text-xs hover:bg-muted whitespace-nowrap">Invoice</Link>

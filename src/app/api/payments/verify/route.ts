@@ -1,9 +1,8 @@
-import { NextResponse, after } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import { verifyPaymentSignature } from "@/lib/razorpay";
-import { finalizeOrder } from "@/lib/fulfillment";
-import { notifyOrderStatus, notifyNewOrderToAdmin } from "@/lib/notify";
+import { onlineAmountDue, settleOrderPayment } from "@/lib/payments";
 import { audit, actorFrom } from "@/lib/audit";
 
 export const runtime = "nodejs";
@@ -55,46 +54,18 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Order not found" }, { status: 404 });
   }
 
-  // Already verified (a retried or doubled callback): confirm without touching
-  // the order again — it may already be in the kitchen — and without messaging
-  // the customer twice.
-  if (order.invoiceNo && (order.paymentStatus === "PAID" || order.paymentStatus === "PARTIAL")) {
-    const current = await prisma.order.findUnique({ where: { id: order.id }, include: { items: true } });
-    return NextResponse.json({ ok: true, order: current, alreadyVerified: true });
-  }
-
-  // A COD order only collects its confirmation amount online — the balance is
-  // still due in cash, so it is PARTIAL rather than PAID.
-  const isCodConfirmation = order.paymentMethod === "cod" && order.codBalanceDue > 0;
-  const collected = isCodConfirmation ? order.total - order.codBalanceDue : order.total;
-
-  await prisma.order.update({
-    where: { id: order.id },
-    data: {
-      paymentStatus: isCodConfirmation ? "PARTIAL" : "PAID",
-      status: "PLACED",
-      razorpayPaymentId: razorpay_payment_id,
-      codConfirmPaid: isCodConfirmation ? collected : 0,
-    },
-  });
-
-  // Assign invoice number + decrement stock (idempotent).
-  const updated = await finalizeOrder(order.id);
-  await audit({
+  // The signature proves Razorpay took the payment for this Razorpay order,
+  // whose amount we fixed when creating it. A retried or doubled callback is
+  // confirmed without touching the order again or messaging anyone twice.
+  const r = await settleOrderPayment({
+    orderId: order.id,
+    gateway: "razorpay",
+    paymentId: razorpay_payment_id,
+    amount: onlineAmountDue(order),
+    via: "checkout",
     actor: actorFrom(s),
-    action: "order.paid",
-    entityType: "order",
-    entityId: order.id,
-    summary: isCodConfirmation
-      ? `COD confirmation of ₹${collected} verified — ₹${updated.codBalanceDue} due on delivery (${updated.invoiceNo})`
-      : `Payment verified — ₹${updated.total} (${updated.invoiceNo})`,
-    metadata: { razorpay_order_id, razorpay_payment_id, total: updated.total, collected, balanceDue: updated.codBalanceDue },
     req,
   });
-  after(async () => {
-    await notifyOrderStatus(updated.id, "PENDING");
-    await notifyNewOrderToAdmin(updated);
-  });
-
-  return NextResponse.json({ ok: true, order: updated });
+  if (!r.ok) return NextResponse.json({ error: "Payment verification failed" }, { status: 400 });
+  return NextResponse.json({ ok: true, order: r.order, ...(r.already ? { alreadyVerified: true } : {}) });
 }

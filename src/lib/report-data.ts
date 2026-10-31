@@ -10,7 +10,7 @@ export type ReportType = (typeof REPORT_TYPES)[number];
 const d = (x: Date | null | undefined) => (x ? new Date(x).toLocaleString("en-IN") : "");
 const day = (x: Date | null | undefined) => (x ? new Date(x).toLocaleDateString("en-IN") : "");
 
-const METHOD: Record<string, string> = { razorpay: "Online", cod: "Cash on Delivery", manual: "Manual" };
+const METHOD: Record<string, string> = { razorpay: "Online", cashfree: "Online", cod: "Cash on Delivery", manual: "Manual" };
 
 /** Builds the rows behind every admin export (CSV / Excel / PDF share this). */
 export async function buildReport(type: ReportType): Promise<Report> {

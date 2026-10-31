@@ -124,6 +124,7 @@ enum PaymentStatus {
   PARTIAL // COD confirmation amount collected online; balance due in cash
   PAID
   FAILED
+  REFUNDED // the online amount was paid back (gateway refund or recorded by an admin)
 }
 
 model Order {
@@ -176,6 +177,19 @@ model Order {
 
   razorpayOrderId   String?
   razorpayPaymentId String?
+
+  /// Cashfree: the gateway order for the latest payment attempt (our id, with a
+  /// "-2", "-3"… suffix when a payment is retried) and the successful payment.
+  cashfreeOrderId   String? @unique
+  cashfreePaymentId String?
+
+  /// Refund of the online payment (spec #12): what was paid back and its state
+  /// at the gateway — REQUESTED · PENDING · SUCCESS · FAILED · MANUAL.
+  refundAmount Int?
+  refundId     String?
+  refundStatus String?
+  refundNote   String?
+  refundedAt   DateTime?
 
   tickets Ticket[]
 
@@ -279,6 +293,10 @@ model StoreSetting {
   notifyMessages       Json?
   waStatusTemplate     String?
   waStatusTemplateLang String        @default("en")
+
+  /// Which gateway takes online payments: AUTO (Cashfree when its keys are set,
+  /// otherwise Razorpay) · CASHFREE · RAZORPAY. Memberships stay on Razorpay.
+  paymentGateway String @default("AUTO")
 
   updatedAt DateTime @updatedAt
 }

@@ -58,7 +58,9 @@ export async function customerContext(conv: { customerId: string | null; phone: 
       items: o.items.map((i) => `${i.qty}× ${i.name}`).join(", "),
       total: o.total,
       payment:
-        o.paymentMethod === "subscription"
+        o.paymentStatus === "REFUNDED"
+          ? "Refunded"
+          : o.paymentMethod === "subscription"
           ? "Prepaid (meal plan)"
           : o.paymentMethod === "cod"
             ? o.paymentStatus === "PAID"

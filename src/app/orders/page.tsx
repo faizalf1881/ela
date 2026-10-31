@@ -158,7 +158,7 @@ export default function OrdersPage() {
 
                   <div className="mt-4 pt-3 border-t border-border flex flex-wrap items-center justify-between gap-3">
                     <span className="text-sm text-muted-foreground">
-                      {o.paymentMethod === "cod" ? "Cash on delivery" : o.paymentStatus === "PAID" ? "Paid online" : "Payment pending"}
+                      {o.paymentStatus === "REFUNDED" ? "Refunded" : o.paymentMethod === "cod" ? "Cash on delivery" : o.paymentStatus === "PAID" ? "Paid online" : "Payment pending"}
                     </span>
                     <span className="text-lg font-semibold tabular-nums text-foreground">{inr(o.total)}</span>
                   </div>

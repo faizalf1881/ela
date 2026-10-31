@@ -51,7 +51,15 @@ export type OrderDTO = {
   total: number;
   status: OrderStatus;
   paymentMethod: string;
-  paymentStatus: "UNPAID" | "PARTIAL" | "PAID" | "FAILED";
+  paymentStatus: "UNPAID" | "PARTIAL" | "PAID" | "FAILED" | "REFUNDED";
+  codConfirmPaid?: number;
+  refundStatus?: string | null;
+  refundAmount?: number | null;
+  couponDiscount?: number;
+  membershipDiscount?: number;
+  placedAt?: string | null;
+  cashfreePaymentId?: string | null;
+  razorpayPaymentId?: string | null;
   codBalanceDue?: number;
   deliveryDate?: string | null;
   deliverySlot?: { id: string; label: string } | null;

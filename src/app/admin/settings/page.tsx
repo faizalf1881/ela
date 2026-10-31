@@ -5,6 +5,7 @@ import { ScanWorkflowSettings } from "@/components/staff/ScanWorkflowSettings";
 import { OrderAlertSettings } from "@/components/staff/OrderAlertSettings";
 import { WhatsAppNotifySettings } from "@/components/staff/WhatsAppNotifySettings";
 import { AiSettings } from "@/components/staff/AiSettings";
+import { PaymentSettings } from "@/components/staff/PaymentSettings";
 
 export default function AdminSettingsPage() {
   return (
@@ -16,6 +17,7 @@ export default function AdminSettingsPage() {
         <ScanWorkflowSettings />
         <WhatsAppNotifySettings />
         <AiSettings />
+        <PaymentSettings />
       </div>
     </StaffShell>
   );

@@ -9,6 +9,7 @@ import { CACHE_TAGS } from "@/lib/menu-cache";
 import { DEFAULT_ORDER_SOUND } from "@/lib/order-sound-config";
 import { DEFAULT_MESSAGES, NOTIFY_STATUSES, PLACEHOLDERS, type NotifyStatus } from "@/lib/order-notify";
 import { whatsappConfigured } from "@/lib/whatsapp";
+import { GATEWAY_LABEL, gatewayAvailability, pickGateway, siteUrl } from "@/lib/payments";
 import type { Prisma } from "@prisma/client";
 
 export const runtime = "nodejs";
@@ -42,6 +43,17 @@ async function load() {
       template: s.waStatusTemplate,
       templateLang: s.waStatusTemplateLang,
     },
+    payments: (() => {
+      const active = pickGateway(s.paymentGateway);
+      return {
+        preference: s.paymentGateway,
+        active,
+        activeLabel: active ? GATEWAY_LABEL[active] : null,
+        ...gatewayAvailability(),
+        // Where to point the gateways' dashboards.
+        webhooks: { cashfree: `${siteUrl()}/api/webhooks/cashfree`, razorpay: `${siteUrl()}/api/webhooks/razorpay` },
+      };
+    })(),
   };
 }
 
@@ -62,6 +74,7 @@ const schema = z.object({
   // Meta template names are lower-case letters, digits and underscores.
   waStatusTemplate: z.string().trim().regex(/^[a-z0-9_]{1,512}$/, "Template names use lower-case letters, digits and _").nullable().or(z.literal("")).optional(),
   waStatusTemplateLang: z.string().trim().regex(/^[a-z]{2,3}(_[A-Z]{2})?$/).optional(),
+  paymentGateway: z.enum(["AUTO", "CASHFREE", "RAZORPAY"]).optional(),
 });
 
 export async function PATCH(req: Request) {
@@ -85,6 +98,7 @@ export async function PATCH(req: Request) {
     notifyMessages?: Prisma.InputJsonValue;
     waStatusTemplate?: string | null;
     waStatusTemplateLang?: string;
+    paymentGateway?: string;
   } = {};
   const changes: string[] = [];
 
@@ -132,10 +146,15 @@ export async function PATCH(req: Request) {
     changes.push(data.waStatusTemplate ? `WhatsApp status template set to ${data.waStatusTemplate}` : "WhatsApp status template removed");
   }
   if (d.waStatusTemplateLang) data.waStatusTemplateLang = d.waStatusTemplateLang;
+  if (d.paymentGateway) {
+    data.paymentGateway = d.paymentGateway;
+    const resolved = pickGateway(d.paymentGateway);
+    changes.push(`Online payments: ${d.paymentGateway === "AUTO" ? "automatic" : GATEWAY_LABEL[d.paymentGateway === "CASHFREE" ? "cashfree" : "razorpay"]}${resolved ? ` (${GATEWAY_LABEL[resolved]})` : " — not configured, online payment unavailable"}`);
+  }
 
   await prisma.storeSetting.update({ where: { id: 1 }, data });
-  // The customer confirmation sound is served through the cached public settings.
-  if (d.orderSoundUrl !== undefined) revalidateTag(CACHE_TAGS.settings);
+  // The confirmation sound and the payment gateway are served through the cached public settings.
+  if (d.orderSoundUrl !== undefined || d.paymentGateway) revalidateTag(CACHE_TAGS.settings);
 
   await audit({
     actor: actorFrom(s),

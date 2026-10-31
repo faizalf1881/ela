@@ -6,6 +6,7 @@ import { getSession } from "@/lib/auth";
 import { audit, actorFrom } from "@/lib/audit";
 import { getStoreSetting, CACHE_TAGS } from "@/lib/menu-cache";
 import { DEFAULT_ORDER_SOUND } from "@/lib/order-sound-config";
+import { GATEWAY_LABEL, pickGateway } from "@/lib/payments";
 
 async function getOrCreate() {
   return (
@@ -17,6 +18,7 @@ async function getOrCreate() {
 // GET /api/settings — public (store open state for banners/checkout). Cached.
 export async function GET() {
   const s = await getStoreSetting();
+  const gateway = pickGateway(s?.paymentGateway);
   return NextResponse.json({
     acceptingOrders: s?.acceptingOrders ?? true,
     closedMessage: s?.closedMessage ?? null,
@@ -28,6 +30,9 @@ export async function GET() {
     maxPreorderDays: s?.maxPreorderDays ?? 7,
     // Played to the customer when their order is confirmed (spec #51).
     orderSoundUrl: s?.orderSoundUrl || DEFAULT_ORDER_SOUND,
+    // Which gateway takes online payments (name only — no keys).
+    onlineGateway: gateway,
+    onlineGatewayLabel: gateway ? GATEWAY_LABEL[gateway] : null,
   });
 }
 

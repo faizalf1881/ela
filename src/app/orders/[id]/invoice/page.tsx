@@ -65,7 +65,7 @@ export default async function InvoicePage({ params }: { params: Promise<{ id: st
               <div className="text-xs uppercase tracking-wider text-black/50">Order</div>
               <div className="mt-1">#{order.id.slice(-6).toUpperCase()}</div>
               <div className="text-black/70">Status: {STATUS_LABEL[order.status as OrderStatus]}</div>
-              <div className="text-black/70">Payment: {order.paymentMethod === "cod" ? "Cash on Delivery" : "Online (Razorpay)"}</div>
+              <div className="text-black/70">Payment: {order.paymentMethod === "cod" ? "Cash on Delivery" : order.paymentMethod === "cashfree" ? "Online (Cashfree)" : order.paymentMethod === "manual" ? "Manual" : "Online (Razorpay)"}{order.paymentStatus === "REFUNDED" ? " · Refunded" : ""}</div>
               {order.deliveryDate && (
                 <div className="text-black/70">
                   Delivery: {new Date(order.deliveryDate).toLocaleDateString("en-IN", { timeZone: "UTC", day: "numeric", month: "short" })}

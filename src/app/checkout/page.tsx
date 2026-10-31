@@ -27,6 +27,7 @@ import { useAuth } from "@/lib/auth-client";
 import { inr } from "@/lib/utils";
 import { playSound, unlockAudio } from "@/lib/order-sound";
 import { DEFAULT_ORDER_SOUND } from "@/lib/order-sound-config";
+import { cashfreeCheckout, loadRazorpay, type RazorpayResponse } from "@/lib/gateway-client";
 
 /**
  * The restaurant's order sound, played once when an order is confirmed (spec
@@ -42,40 +43,16 @@ function playOrderConfirmation(orderId: string, soundUrl: string) {
   void playSound(soundUrl);
 }
 
-type RazorpayResponse = {
-  razorpay_payment_id: string;
-  razorpay_order_id: string;
-  razorpay_signature: string;
-};
-
 type Location = { id: string; name: string; area: string | null; deliveryFee: number };
 type Slot = { id: string; label: string };
 type Day = { date: string; label: string; isToday: boolean; slots: Slot[] };
 type Applied = { code: string; discount: number; label: string };
 
-declare global {
-  interface Window {
-    Razorpay?: new (options: Record<string, unknown>) => { open: () => void; on: (e: string, cb: (r: unknown) => void) => void };
-  }
-}
-
-function loadRazorpay(): Promise<boolean> {
-  return new Promise((resolve) => {
-    if (typeof window === "undefined") return resolve(false);
-    if (window.Razorpay) return resolve(true);
-    const script = document.createElement("script");
-    script.src = "https://checkout.razorpay.com/v1/checkout.js";
-    script.onload = () => resolve(true);
-    script.onerror = () => resolve(false);
-    document.body.appendChild(script);
-  });
-}
-
 export default function CheckoutPage() {
   const router = useRouter();
   const { items, setQty, remove, subtotal, clear, count } = useCart();
   const { user, membership, loading: authLoading } = useAuth();
-  const [form, setForm] = useState({ name: "", phone: "", locationId: "", date: "", slotId: "", method: "razorpay" as "razorpay" | "cod" });
+  const [form, setForm] = useState({ name: "", phone: "", locationId: "", date: "", slotId: "", method: "online" as "online" | "cod" });
   const [locations, setLocations] = useState<Location[]>([]);
   const [days, setDays] = useState<Day[]>([]);
   const [slotsConfigured, setSlotsConfigured] = useState(false);
@@ -85,12 +62,13 @@ export default function CheckoutPage() {
   const [couponOpen, setCouponOpen] = useState(false);
   const [placed, setPlaced] = useState<null | { id: string; total: number; method: string; balanceDue?: number }>(null);
   const [busy, setBusy] = useState(false);
-  const [store, setStore] = useState<{ accepting: boolean; message: string | null; codEnabled: boolean; codConfirmAmount: number; soundUrl: string }>({
+  const [store, setStore] = useState<{ accepting: boolean; message: string | null; codEnabled: boolean; codConfirmAmount: number; soundUrl: string; gatewayLabel: string | null }>({
     accepting: true,
     message: null,
     codEnabled: true,
     codConfirmAmount: 0,
     soundUrl: DEFAULT_ORDER_SOUND,
+    gatewayLabel: "our payment partner",
   });
 
   useEffect(() => {
@@ -103,6 +81,7 @@ export default function CheckoutPage() {
           codEnabled: d.codEnabled ?? true,
           codConfirmAmount: d.codConfirmAmount ?? 0,
           soundUrl: d.orderSoundUrl || DEFAULT_ORDER_SOUND,
+          gatewayLabel: d.onlineGatewayLabel ?? null,
         }),
       )
       .catch(() => {});
@@ -149,7 +128,7 @@ export default function CheckoutPage() {
 
   // COD may be turned off by admin at any moment — never leave it selected.
   useEffect(() => {
-    if (!store.codEnabled && form.method === "cod") setForm((f) => ({ ...f, method: "razorpay" }));
+    if (!store.codEnabled && form.method === "cod") setForm((f) => ({ ...f, method: "online" }));
   }, [store.codEnabled, form.method]);
 
   const selectedLocation = locations.find((l) => l.id === form.locationId) || null;
@@ -237,8 +216,36 @@ export default function CheckoutPage() {
         toast.success("Order placed! Pay cash on delivery.");
         return;
       }
-      // "cod_confirm" falls through to Razorpay for the confirmation amount only.
+      // "cod_confirm" falls through to the gateway for the confirmation amount only.
       const codConfirm = data.paymentMethod === "cod_confirm";
+
+      if (data.gateway === "cashfree") {
+        modalOpened = true;
+        const result = await cashfreeCheckout(data.cashfree.paymentSessionId, data.cashfree.mode);
+        // Some in-app browsers leave for Cashfree's page; it brings the customer back to /pay.
+        if (result.redirect) return;
+        // Whatever the pop-up reported, only Cashfree's own record counts.
+        const vr = await fetch("/api/payments/cashfree/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orderId: data.order.id }),
+        });
+        const vd = await vr.json();
+        setBusy(false);
+        if (vd.paid) {
+          setPlaced({ id: vd.order.id, total: vd.order.total, method: codConfirm ? "cod" : "online", balanceDue: vd.order.codBalanceDue ?? 0 });
+          playOrderConfirmation(vd.order.id, store.soundUrl);
+          clear();
+          toast.success(codConfirm ? `Order confirmed! ${inr(vd.order.codBalanceDue ?? 0)} due in cash on delivery.` : "Payment successful! Order confirmed.");
+        } else if (vd.pending) {
+          toast.message("We're confirming your payment", { description: vd.error || "If money was taken, your order is confirmed automatically — check My Orders in a minute." });
+        } else if (vd.status === "FAILED") {
+          toast.error("Payment failed. Please try again.");
+        } else {
+          toast.message("Payment not completed", { description: "Your order was not placed." });
+        }
+        return;
+      }
 
       const ok = await loadRazorpay();
       if (!ok || !window.Razorpay) throw new Error("Could not load payment gateway");
@@ -263,7 +270,7 @@ export default function CheckoutPage() {
             });
             const vd = await vr.json();
             if (!vr.ok) throw new Error(vd.error || "Verification failed");
-            setPlaced({ id: vd.order.id, total: vd.order.total, method: codConfirm ? "cod" : "razorpay", balanceDue: vd.order.codBalanceDue ?? 0 });
+            setPlaced({ id: vd.order.id, total: vd.order.total, method: codConfirm ? "cod" : "online", balanceDue: vd.order.codBalanceDue ?? 0 });
             playOrderConfirmation(vd.order.id, store.soundUrl);
             clear();
             toast.success(
@@ -533,7 +540,13 @@ export default function CheckoutPage() {
                 <div className="mt-5">
                   <div className="text-xs uppercase tracking-[0.24em] text-muted-foreground mb-2">Payment</div>
                   <div className={`grid gap-2 ${store.codEnabled ? "grid-cols-2" : "grid-cols-1"}`}>
-                    <PayOption active={form.method === "razorpay"} onClick={() => setForm({ ...form, method: "razorpay" })} icon={CreditCard} title="Pay online" sub="UPI · Cards · Wallets" />
+                    <PayOption
+                      active={form.method === "online"}
+                      onClick={() => setForm({ ...form, method: "online" })}
+                      icon={CreditCard}
+                      title="Pay online"
+                      sub={store.gatewayLabel ? "UPI · Cards · Wallets" : "Unavailable right now"}
+                    />
                     {store.codEnabled && (
                       <PayOption
                         active={form.method === "cod"}
@@ -588,7 +601,7 @@ export default function CheckoutPage() {
                   {ctaLabel}
                 </button>
                 <p className="mt-3 text-xs text-muted-foreground text-center">
-                  Payments are processed securely by Razorpay. Your card details never touch our servers.
+                  Payments are processed securely by {store.gatewayLabel || "our payment partner"}. Your card details never touch our servers.
                 </p>
                 {isCustomer && !membership.active && (
                   <Link
