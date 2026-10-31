@@ -9,6 +9,16 @@ import { publicSiteInfo, type PublicSiteInfo } from "@/lib/site-content";
 
 const WA = process.env.NEXT_PUBLIC_WHATSAPP_NUMBER || "917907577979";
 
+/** Policy pages payment gateways and customers look for. */
+const POLICY_LINKS = [
+  { href: "/about", label: "About us" },
+  { href: "/contact", label: "Contact us" },
+  { href: "/delivery", label: "Delivery policy" },
+  { href: "/refund", label: "Refund & cancellation" },
+  { href: "/privacy", label: "Privacy policy" },
+  { href: "/terms", label: "Terms & conditions" },
+];
+
 /**
  * Contact details come from Admin → Website (spec #7). The homepage passes them
  * in; other pages load the same (cached) details, showing the built-in ones
@@ -117,7 +127,15 @@ export function Footer({ info: given }: { info?: PublicSiteInfo }) {
           </div>
         </div>
 
-        <div className="mt-16 pt-8 border-t border-white/10 flex flex-wrap justify-between gap-4 text-xs text-ivory/50">
+        <nav aria-label="Policies" className="mt-16 flex flex-wrap gap-x-6 gap-y-3 text-sm text-ivory/70">
+          {POLICY_LINKS.map((l) => (
+            <Link key={l.href} href={l.href} className="hover:text-gold">
+              {l.label}
+            </Link>
+          ))}
+        </nav>
+
+        <div className="mt-8 pt-8 border-t border-white/10 flex flex-wrap justify-between gap-4 text-xs text-ivory/50">
           <div>© {new Date().getFullYear()} Ela &amp; Co. All rights reserved.</div>
           <div>Handcrafted in Kerala.</div>
         </div>

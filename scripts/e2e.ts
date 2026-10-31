@@ -639,6 +639,67 @@ async function main() {
   const custLoc = await customer.fetch("/api/locations", { method: "POST", body: JSON.stringify({ name: "Nope" }) });
   ok(custLoc.status === 403, "customer cannot create locations → 403");
 
+  // ---------- Policy pages ----------
+  section("Policy pages: terms, privacy, refund, delivery, contact, about");
+  const plain = (html: string) =>
+    html
+      .replace(/<[^>]*>/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&#x27;|&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, " ");
+  const policyPage = async (p: string) => {
+    const r = await new Client().fetch(p);
+    const html = await r.text();
+    return { status: r.status, html, text: plain(html) };
+  };
+  const POLICY_PAGES: [string, string][] = [
+    ["/terms", "Terms & Conditions"],
+    ["/privacy", "Privacy Policy"],
+    ["/refund", "Refund & Cancellation Policy"],
+    ["/delivery", "How we get it to you."],
+    ["/contact", "We'd love to hear from you."],
+    ["/about", "Flavours wrapped in tradition."],
+  ];
+  const policyHtml: Record<string, { status: number; html: string; text: string }> = {};
+  for (const [p] of POLICY_PAGES) policyHtml[p] = await policyPage(p);
+  ok(POLICY_PAGES.every(([p, h]) => policyHtml[p].status === 200 && policyHtml[p].text.includes(h)), "all six policy pages open without logging in");
+  const linksAll = (html: string) => POLICY_PAGES.every(([p]) => html.includes(`href="${p}"`));
+  ok(linksAll(await (await new Client().fetch("/")).text()) && POLICY_PAGES.every(([p]) => linksAll(policyHtml[p].html)), "every page's footer links to all six");
+  const terms = policyHtml["/terms"].text;
+  ok(/pay online/.test(terms) && !terms.includes("Cash on Delivery basis") && !terms.includes("elaandco.in"), "terms describe online payment (not 'cash on delivery only') and name the real site");
+  const privacy = policyHtml["/privacy"].text;
+  ok(privacy.includes("Reply STOP") && privacy.includes("never see or store your card or UPI details"), "privacy policy covers WhatsApp offers (STOP) and card data");
+  // Contact details come from Admin → Website (changed in the website section above).
+  const contactNow = await waitFor(async () => {
+    const c = await policyPage("/contact");
+    return c.text.includes("+91 90000 11111") ? c.text : null;
+  });
+  ok(
+    !!contactNow && contactNow.includes("Mon–Sat, 11 AM – 9 PM") && contactNow.includes("Nithya Sahayamatha Bhavan") && contactNow.includes("Grievance"),
+    "contact page shows the phone and hours from Admin → Website, the registered address and the grievance officer",
+  );
+  // The delivery policy states the live areas, fees, slots and rules — not the old hard-coded text.
+  const storeRules = await (await new Client().fetch("/api/settings")).json();
+  const pubSlots = ((await (await new Client().fetch("/api/slots")).json()).slots ?? []) as { label: string }[];
+  const deliveryNow = await waitFor(async () => {
+    const d = await policyPage("/delivery");
+    return d.text.includes(locJson.location.name) ? d.text : null;
+  });
+  ok(!!deliveryNow && deliveryNow.includes(`${locJson.location.name} (Test zone) — ₹45 delivery`), "a newly added delivery area appears on the delivery policy with its fee");
+  ok(
+    !!deliveryNow && (pubLocs.locations as { name: string }[]).every((l) => deliveryNow.includes(l.name)) && pubSlots.every((s) => deliveryNow.includes(s.label)),
+    "the delivery policy lists every active area and time slot",
+  );
+  const sameDayOk = storeRules.orderCutoffMinutes > 0 ? deliveryNow?.includes("Order before") : deliveryNow?.includes("we don't offer same-day delivery");
+  const daysOk = JSON.stringify(storeRules.deliveryDays) === "[1,2,3,4,5,6]" ? deliveryNow?.includes("We deliver Monday to Saturday") : deliveryNow?.includes("We deliver");
+  ok(
+    !!sameDayOk && !!daysOk && !!deliveryNow?.includes(`up to ${storeRules.maxPreorderDays} days ahead`) && !deliveryNow.includes("₹799"),
+    "delivery days, same-day rule and pre-order window match the store settings",
+  );
+  const sitemap = await (await new Client().fetch("/sitemap.xml")).text();
+  ok(POLICY_PAGES.every(([p]) => sitemap.includes(`${p}</loc>`)), "the sitemap lists the policy pages");
+
   // ---------- Coupons ----------
   section("Coupons");
   const couponCode = "E2E" + Date.now().toString().slice(-6);
