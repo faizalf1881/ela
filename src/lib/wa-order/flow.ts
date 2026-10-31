@@ -6,7 +6,7 @@ import { inr } from "../utils";
 import { assertSlotAvailable, getAvailability, humanDate, toDbDate } from "../delivery";
 import { getMembership } from "../membership";
 import { orderTotals, priceCart, type CartLine } from "../order-pricing";
-import { activeGateway, GATEWAY_LABEL, onlineAmountDue, payLink } from "../payments";
+import { activeGateway, GATEWAY_LABEL, onlineAmountDue, payLink, reconcilePayment } from "../payments";
 import { finalizeOrder, OutOfStockError } from "../fulfillment";
 import { notifyNewOrderToAdmin, notifyOrderStatus } from "../notify";
 import { liveMenu, type Dish } from "./catalog";
@@ -386,8 +386,10 @@ async function linkOut(o: { id: string; total: number; paymentMethod: string; co
  */
 async function pay(ctx: Ctx, method: "online" | "cod"): Promise<ui.Out[]> {
   const pending = await pendingOrder(ctx);
-  if (pending) return [await linkOut(pending)];
-  if (ctx.draft.step !== "REVIEW" || ctx.draft.quotedTotal === null) return checkout(ctx);
+  // The same Pay tapped again on an order nothing has changed about since:
+  // the same link, never a second order.
+  if (pending && ctx.draft.step === "PAYMENT" && method === (pending.paymentMethod === "cod" ? "cod" : "online")) return [await linkOut(pending)];
+  if ((ctx.draft.step !== "REVIEW" && ctx.draft.step !== "PAYMENT") || ctx.draft.quotedTotal === null) return checkout(ctx);
   if (ctx.setting && !ctx.setting.acceptingOrders) return [ctx.setting.closedMessage || "We're not taking orders right now — please check back soon."];
 
   const { lines, problems } = await priceCart(itemsOf(ctx.draft));
@@ -417,6 +419,13 @@ async function pay(ctx: Ctx, method: "online" | "cod"): Promise<ui.Out[]> {
     return method === "online" && codEnabled
       ? ["Online payment isn't available right now — you can choose Cash on delivery.", ...(await review(ctx, lines, loc))]
       : ["Sorry, we can't take payments here right now. A team member will help you shortly."];
+  }
+
+  // The customer confirmed a new summary while an earlier order still waits for
+  // payment: that order is replaced — unless its payment is already going through.
+  if (pending) {
+    const settled = await settleOrRetire(ctx, pending, "Replaced by a newer order on WhatsApp");
+    if (settled) return settled;
   }
 
   // WhatsApp has verified this number, so it identifies the customer.
@@ -467,18 +476,21 @@ async function pay(ctx: Ctx, method: "online" | "cod"): Promise<ui.Out[]> {
     return [await linkOut(order)];
   }
 
-  // Cash on delivery: nothing to collect online, so it is placed now.
+  // Cash on delivery: nothing to collect online, so it is placed now. The cart
+  // empties first, so a retried tap can never place the same order twice.
+  const cartItems = itemsOf(ctx.draft);
+  await save(ctx, AFTER_ORDER);
   let placed;
   try {
     placed = await finalizeOrder(order.id, { strict: true });
   } catch (e) {
     if (e instanceof OutOfStockError) {
       await prisma.order.delete({ where: { id: order.id } }).catch(() => {});
-      return [`${e.message} Your order wasn't placed.`, ...(await checkout(ctx))];
+      await save(ctx, { items: cartItems, step: "BROWSING" });
+      return [`${e.message} Your order wasn't placed.`, await cartOut(ctx)];
     }
     throw e;
   }
-  await save(ctx, AFTER_ORDER);
   await notifyOrderStatus(placed.id, null);
   await notifyNewOrderToAdmin(placed);
   // The "order confirmed" update is the confirmation; say it ourselves only if that update is switched off.
@@ -489,17 +501,39 @@ async function pay(ctx: Ctx, method: "online" | "cod"): Promise<ui.Out[]> {
 async function cancel(ctx: Ctx): Promise<ui.Out[]> {
   const pending = await pendingOrder(ctx);
   if (pending) {
-    await prisma.order.updateMany({ where: { id: pending.id, status: "PENDING" }, data: { status: "CANCELLED", statusChangedAt: new Date() } });
-    await audit({
-      actor: { type: "customer", id: pending.customerId ?? undefined, label: ctx.conv.phone },
-      action: "order.cancelled_by_customer",
-      entityType: "order",
-      entityId: pending.id,
-      summary: `Unpaid WhatsApp order #${pending.id.slice(-6).toUpperCase()} cancelled by the customer`,
-    });
+    const settled = await settleOrRetire(ctx, pending, "Cancelled by the customer on WhatsApp");
+    if (settled) return settled;
   }
   await save(ctx, AFTER_ORDER);
   return [{ kind: "buttons", body: "Okay — nothing has been ordered. Whenever you're ready, I'm here.", buttons: [{ id: "o:m", title: "View menu" }] }];
+}
+
+/**
+ * Before an unpaid order is dropped (replaced or cancelled), ask the gateway
+ * about it: if it was paid meanwhile it is kept and confirmed; if a payment is
+ * still going through, nothing is dropped. Otherwise it is cancelled, so its
+ * old link can no longer be paid. Returns a reply when the customer must be told.
+ */
+async function settleOrRetire(ctx: Ctx, o: { id: string; cashfreeOrderId: string | null; razorpayOrderId: string | null; customerId: string | null }, why: string): Promise<ui.Out[] | null> {
+  const ref = `#${o.id.slice(-6).toUpperCase()}`;
+  const actor = { type: "customer", id: o.customerId ?? undefined, label: ctx.conv.phone };
+  const check = o.cashfreeOrderId || o.razorpayOrderId ? await reconcilePayment(o, actor, "whatsapp").catch(() => ({ paid: false, status: "UNKNOWN" })) : { paid: false, status: "NO_PAYMENT" };
+  if (check.paid) {
+    await save(ctx, AFTER_ORDER);
+    return [`✅ Your earlier order ${ref} has just been paid, so it's confirmed. To order something more, tap View menu.`];
+  }
+  if (check.status === "PENDING" || check.status === "UNKNOWN") {
+    return [`A payment for your earlier order ${ref} may still be going through. Please wait a minute and tap again — so you're never charged twice.`];
+  }
+  const retired = await prisma.order.updateMany({
+    where: { id: o.id, status: "PENDING", paymentStatus: { in: ["UNPAID", "FAILED"] } },
+    data: { status: "CANCELLED", statusChangedAt: new Date() },
+  });
+  if (retired.count) {
+    await audit({ actor, action: "order.cancelled_by_customer", entityType: "order", entityId: o.id, summary: `Unpaid WhatsApp order ${ref}: ${why}` });
+  }
+  await save(ctx, { orderId: null });
+  return null;
 }
 
 /** What the assistant needs to know about this customer's cart and checkout. */

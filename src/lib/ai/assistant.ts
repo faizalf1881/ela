@@ -290,13 +290,12 @@ export function amountsIn(text: string): number[] {
 /**
  * Prices in a reply that appear nowhere in what the assistant was told (spec
  * #9: it must never invent prices). Amounts from the facts — menu prices,
- * fees, order totals — and simple multiples of them (2 × ₹224) are fine, as
- * is anything the customer wrote themselves.
+ * fees, order totals — and simple multiples of them (2 × ₹224) are fine.
+ * A price the customer suggested is not: the AI must not agree to it.
  */
-export function inventedAmounts(reply: string, facts: string, customerText: string): number[] {
+export function inventedAmounts(reply: string, facts: string): number[] {
   const allowed = new Set<number>();
   for (const a of amountsIn(facts)) for (let k = 1; k <= 10; k++) allowed.add(Math.round(a * k * 100) / 100);
-  for (const a of amountsIn(customerText)) allowed.add(a);
   return amountsIn(reply).filter((a) => !allowed.has(a));
 }
 

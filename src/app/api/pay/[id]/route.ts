@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { activeGateway, AlreadyPaidError, confirmCashfreePayment, onlineAmountDue, paymentBlocker, startOnlinePayment, validPayToken } from "@/lib/payments";
+import { activeGateway, AlreadyPaidError, onlineAmountDue, paymentBlocker, reconcilePayment, startOnlinePayment, validPayToken } from "@/lib/payments";
 
 export const runtime = "nodejs";
 
@@ -33,7 +33,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ ...start, amount: onlineAmountDue(order), prefill: { name: order.customerName, contact: order.customerPhone } });
   } catch (e) {
     if (e instanceof AlreadyPaidError) {
-      await confirmCashfreePayment(order, { type: "customer", label: order.customerPhone }, "pay-page", req).catch(() => null);
+      await reconcilePayment(order, { type: "customer", label: order.customerPhone }, "pay-page", req).catch(() => null);
       return NextResponse.json({ error: "This order is already paid.", paid: true }, { status: 409 });
     }
     // eslint-disable-next-line no-console

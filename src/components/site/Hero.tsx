@@ -74,7 +74,7 @@ export function Hero({
             </div>
 
             {stats.length > 0 && (
-              <div className="mt-12 flex flex-wrap items-center gap-x-8 gap-y-4">
+              <div className="mt-12 grid max-w-md grid-cols-3 gap-4 sm:flex sm:max-w-none sm:items-center sm:gap-8">
                 {stats.map((s) => (
                   <div key={s.label}>
                     <div className="font-serif text-3xl text-foreground">{s.value}</div>

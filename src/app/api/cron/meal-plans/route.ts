@@ -6,6 +6,8 @@ import { resumeCampaigns } from "@/lib/campaigns";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Also resumes a stalled WhatsApp campaign after the response (a ~40 s batch).
+export const maxDuration = 60;
 
 /**
  * Daily meal-plan order generation.

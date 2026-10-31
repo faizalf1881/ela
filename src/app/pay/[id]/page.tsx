@@ -1,8 +1,7 @@
 import type { Metadata } from "next";
 import { prisma } from "@/lib/db";
-import { cashfreeConfigured } from "@/lib/cashfree";
 import { humanDate, dateKeyFromDb } from "@/lib/delivery";
-import { activeGateway, confirmCashfreePayment, GATEWAY_LABEL, onlineAmountDue, paymentBlocker, validPayToken } from "@/lib/payments";
+import { activeGateway, GATEWAY_LABEL, onlineAmountDue, paymentBlocker, reconcilePayment, validPayToken } from "@/lib/payments";
 import { PayView, type PayOrder } from "@/components/site/PayView";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +14,7 @@ async function load(id: string) {
 /**
  * /pay/<order id>?k=<key> — the payment link sent on WhatsApp (spec #10/#11),
  * and where Cashfree returns the customer after paying. On every visit an
- * unpaid order is checked with Cashfree directly, so the page shows the
+ * unpaid order is checked with the gateway directly, so the page shows the
  * gateway's verdict — never the customer's word for it.
  */
 export default async function PayPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ k?: string }> }) {
@@ -23,8 +22,8 @@ export default async function PayPage({ params, searchParams }: { params: Promis
   const { k } = await searchParams;
   let order = validPayToken(id, k) ? await load(id) : null;
 
-  if (order && (order.paymentStatus === "UNPAID" || order.paymentStatus === "FAILED") && order.cashfreeOrderId && cashfreeConfigured()) {
-    const r = await confirmCashfreePayment(order, { type: "customer", id: order.customerId ?? undefined, label: order.customerPhone }, "pay-page").catch(() => null);
+  if (order && (order.paymentStatus === "UNPAID" || order.paymentStatus === "FAILED") && (order.cashfreeOrderId || order.razorpayOrderId)) {
+    const r = await reconcilePayment(order, { type: "customer", id: order.customerId ?? undefined, label: order.customerPhone }, "pay-page").catch(() => null);
     if (r?.paid) order = await load(id);
   }
 

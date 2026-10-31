@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import { actorFrom } from "@/lib/audit";
-import { confirmCashfreePayment, onlineAmountDue, payLink } from "@/lib/payments";
+import { onlineAmountDue, payLink, reconcilePayment } from "@/lib/payments";
 
 export const runtime = "nodejs";
 
@@ -27,13 +27,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const order = await prisma.order.findUnique({ where: { id } });
   if (!order) return NextResponse.json({ error: "Not found" }, { status: 404 });
   if (order.paymentStatus === "PAID" || order.paymentStatus === "PARTIAL") return NextResponse.json({ paid: true, status: "PAID" });
-  if (!order.cashfreeOrderId) {
-    return NextResponse.json({ paid: false, status: order.razorpayOrderId ? "CHECK_DASHBOARD" : "NO_PAYMENT" });
-  }
+  if (!order.cashfreeOrderId && !order.razorpayOrderId) return NextResponse.json({ paid: false, status: "NO_PAYMENT" });
   try {
-    const r = await confirmCashfreePayment(order, actorFrom(s), "admin-check", req);
+    const r = await reconcilePayment(order, actorFrom(s), "admin-check", req);
     return NextResponse.json({ paid: r.paid, status: r.status });
   } catch (e) {
-    return NextResponse.json({ error: `Could not reach Cashfree: ${(e as Error).message}` }, { status: 502 });
+    return NextResponse.json({ error: `Could not reach the payment gateway: ${(e as Error).message}` }, { status: 502 });
   }
 }

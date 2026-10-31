@@ -150,7 +150,8 @@ export async function campaignStats(campaignId: string) {
 
 const BATCH = 25;
 const CONCURRENCY = 5;
-const RUN_MS = 40_000;
+/** Well inside a 60 s server run, even if the last group's sends are slow. */
+const RUN_MS = 30_000;
 /** Errors that would fail for everyone: stop and tell the admin instead of burning through the list. */
 const FATAL = new Set([190, 131031, 132001, 132015, 132016, 133010]);
 
@@ -232,7 +233,8 @@ export async function processCampaign(campaignId: string, budgetMs = RUN_MS): Pr
       let slow = false;
       for (let i = 0; i < batch.length; i += CONCURRENCY) {
         const group = batch.slice(i, i + CONCURRENCY);
-        if (stopped || slow) {
+        // Out of time (or stopping): hand the rest back for the next run.
+        if (stopped || slow || Date.now() > deadline) {
           await prisma.waCampaignRecipient.updateMany({ where: { id: { in: group.map((g) => g.id) }, status: "SENDING" }, data: { status: "PENDING" } });
           continue;
         }

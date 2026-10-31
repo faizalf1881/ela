@@ -352,15 +352,9 @@ export async function aiReply(conversationId: string, triggerMessageId: string):
     const now = await prisma.waConversation.findUniqueOrThrow({ where: { id: conversationId } });
     if (now.mode !== "AI") return stopTyping(conversationId);
 
-    if (answer.handoff) {
-      await sendChatMessage(now, answer.reply, "AI");
-      await changeHandling(conversationId, { mode: "HUMAN", state: "REQUIRES_ATTENTION", reason: answer.reason }, { type: "ai", label: resolved.provider.label });
-      return;
-    }
-
     // Never let a made-up price reach the customer (spec #9): drop the text
     // and let the menu, with its real prices, answer instead.
-    const invented = inventedAmounts(answer.reply, turns[0].content, latest.body);
+    const invented = inventedAmounts(answer.reply, turns[0].content);
     if (invented.length) {
       await audit({
         actor: { type: "ai", label: resolved.provider.label },
@@ -370,8 +364,16 @@ export async function aiReply(conversationId: string, triggerMessageId: string):
         summary: `The AI's reply quoted a price that isn't on the menu (₹${invented.join(", ₹")}) — replaced with the live menu`,
         metadata: { reply: answer.reply, invented },
       });
-      answer = { ...answer, reply: "Here's our menu with today's prices 👇", action: answer.action === "none" ? "show_menu" : answer.action };
-      if (!ordering) answer.reply = "Our team will confirm the exact price for you shortly.";
+      answer = answer.handoff
+        ? { ...answer, reply: "Thanks for your message — a team member will reply here shortly." }
+        : { ...answer, reply: "Here's our menu with today's prices 👇", action: answer.action === "none" ? "show_menu" : answer.action };
+      if (!ordering && !answer.handoff) answer.reply = "Our team will confirm the exact price for you shortly.";
+    }
+
+    if (answer.handoff) {
+      await sendChatMessage(now, answer.reply, "AI");
+      await changeHandling(conversationId, { mode: "HUMAN", state: "REQUIRES_ATTENTION", reason: answer.reason }, { type: "ai", label: resolved.provider.label });
+      return;
     }
 
     const intent = ordering ? actionIntent(answer) : null;
@@ -421,21 +423,43 @@ async function showTyping(conversationId: string, waMessageId: string | null) {
 
 /**
  * One ordering step, then its replies. Steps for the same conversation run
- * one at a time (a Postgres advisory lock), so two quick taps can't both read
- * the cart before either has saved it.
+ * one at a time, so two quick taps can't both read the cart before either has
+ * saved it.
  */
 export async function runOrderIntent(conversationId: string, intent: OrderIntent, lead?: string) {
-  await prisma.$transaction(
-    async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${conversationId}))`;
-      let outs = await applyIntent(conversationId, intent);
-      if (lead) outs = withLead(outs, lead);
-      const conv = await prisma.waConversation.findUniqueOrThrow({ where: { id: conversationId } });
-      for (const o of outs) await sendChatMessage(conv, o, "AI");
-      if (!outs.length) await stopTyping(conversationId);
-    },
-    { maxWait: 20_000, timeout: 60_000 },
-  );
+  await withCartLock(conversationId, async () => {
+    let outs = await applyIntent(conversationId, intent);
+    if (lead) outs = withLead(outs, lead);
+    const conv = await prisma.waConversation.findUniqueOrThrow({ where: { id: conversationId } });
+    for (const o of outs) await sendChatMessage(conv, o, "AI");
+    if (!outs.length) await stopTyping(conversationId);
+  });
+}
+
+/**
+ * A short lease on the chat's cart row — no database connection is held while
+ * a step runs, which matters on serverless where connections are few. A step
+ * waits up to ~20 s for the one before it, then goes ahead rather than drop
+ * the customer's tap.
+ */
+async function withCartLock(conversationId: string, fn: () => Promise<void>) {
+  await prisma.waOrderDraft.upsert({ where: { conversationId }, create: { conversationId }, update: {} });
+  const deadline = Date.now() + 20_000;
+  let held = false;
+  for (;;) {
+    const got = await prisma.waOrderDraft.updateMany({
+      where: { conversationId, OR: [{ lockedUntil: null }, { lockedUntil: { lt: new Date() } }] },
+      data: { lockedUntil: new Date(Date.now() + 30_000) },
+    });
+    held = got.count > 0;
+    if (held || Date.now() > deadline) break;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  try {
+    await fn();
+  } finally {
+    if (held) await prisma.waOrderDraft.updateMany({ where: { conversationId }, data: { lockedUntil: null } });
+  }
 }
 
 /** The assistant won't answer after all: drop the "typing…" bubble. */

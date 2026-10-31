@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { verifyPaymentSignature } from "@/lib/razorpay";
-import { confirmCashfreePayment, onlineAmountDue, settleOrderPayment, validPayToken } from "@/lib/payments";
+import { onlineAmountDue, reconcilePayment, settleOrderPayment, validPayToken } from "@/lib/payments";
 
 export const runtime = "nodejs";
 
@@ -16,7 +16,7 @@ const schema = z.object({
 /**
  * POST /api/pay/[id]/confirm — after the gateway checkout on the payment-link
  * page. Paid only on a valid Razorpay signature for this order's Razorpay
- * order, or when Cashfree's API reports the order PAID.
+ * order, or when the gateway's own API reports the payment.
  */
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -36,12 +36,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       b.razorpay_order_id === order.razorpayOrderId &&
       verifyPaymentSignature({ orderId: b.razorpay_order_id, paymentId: b.razorpay_payment_id, signature: b.razorpay_signature });
     if (!valid) return NextResponse.json({ paid: false, error: "Payment verification failed." }, { status: 400 });
-    const r = await settleOrderPayment({ orderId: order.id, gateway: "razorpay", paymentId: b.razorpay_payment_id!, amount: onlineAmountDue(order), via: "pay-page", actor, req });
+    const r = await settleOrderPayment({ orderId: order.id, gateway: "razorpay", paymentId: b.razorpay_payment_id!, amount: onlineAmountDue(order), gatewayOrderId: b.razorpay_order_id, via: "pay-page", actor, req });
     return NextResponse.json({ paid: r.ok });
   }
 
   try {
-    const r = await confirmCashfreePayment(order, actor, "pay-page", req);
+    const r = await reconcilePayment(order, actor, "pay-page", req);
     return NextResponse.json({ paid: r.paid, status: r.status });
   } catch {
     return NextResponse.json({ paid: false, status: "PENDING", error: "We couldn't confirm the payment yet. If money was taken, your order is confirmed automatically." }, { status: 502 });

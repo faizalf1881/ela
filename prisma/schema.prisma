@@ -707,6 +707,8 @@ model WaOrderDraft {
   quotedTotal        Int?
   /// The order created from this cart while it waits for payment.
   orderId            String?
+  /// Steps for one chat run one at a time: a step holds this for a few seconds.
+  lockedUntil        DateTime?
   createdAt          DateTime       @default(now())
   updatedAt          DateTime       @updatedAt
 }

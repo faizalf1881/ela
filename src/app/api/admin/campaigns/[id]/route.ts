@@ -9,6 +9,8 @@ import { previewText, renderPreview, templateVariables, unsupportedReason } from
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Opening a sending campaign continues it after the response (a ~40 s batch).
+export const maxDuration = 60;
 
 async function admin() {
   const s = await getSession();

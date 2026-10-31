@@ -599,7 +599,7 @@ function PaymentActions({ o, onChanged }: { o: OrderDTO; onChanged: () => void }
         toast.success("Paid — the order is now confirmed");
         onChanged();
       } else {
-        toast.message(d.status === "CHECK_DASHBOARD" ? "Check the Razorpay dashboard for this order" : d.status === "FAILED" ? "The last payment attempt failed" : "Not paid yet");
+        toast.message(d.status === "PENDING" ? "A payment is still going through — check again in a minute" : d.status === "FAILED" ? "The last payment attempt failed" : "Not paid yet");
       }
     });
   const refund = (manual: boolean) =>

@@ -314,7 +314,9 @@ links: *Automatic* (Cashfree once its keys are set, otherwise Razorpay), *Cashfr
 5. Make sure **`NEXT_PUBLIC_SITE_URL`** is the site's real address — payment links use it.
 
 An order is marked paid only when the gateway confirms it (signed webhook, or the order
-read back from Cashfree's API) — never because a link was opened. Refunds: **Orders →
+read back from the gateway's API) — never because a link was opened. While Razorpay is the
+gateway, also tick **order.paid** in Razorpay → Settings → Webhooks (same URL and secret
+as for memberships), so a payment is confirmed even if the customer closes the page. Refunds: **Orders →
 Refund…** (through the gateway, or record one made outside).
 
 ## Going live with real WhatsApp OTP

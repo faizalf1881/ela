@@ -194,6 +194,19 @@ const wa = { calls: [] as WaCall[], mode: "ok" as "ok" | "fail-auth" | "fail-tem
 type AiCall = { url: string; body: { model?: string; messages?: { role: string; content: string }[]; format?: string; response_format?: unknown } };
 const ai = { calls: [] as AiCall[], mode: "ok" as "ok" | "fail" };
 let rzpSeq = 1;
+/** Razorpay orders the stand-in has issued, with their payments. */
+type RzpFakeOrder = { id: string; entity: "order"; amount: number; currency: string; receipt?: string; notes?: Record<string, string>; status: "created" | "attempted" | "paid"; payments: { id: string; entity: "payment"; amount: number; status: string; order_id: string }[] };
+const rzpOrders = new Map<string, RzpFakeOrder>();
+const RZP_WEBHOOK_SECRET = process.env.E2E_RAZORPAY_WEBHOOK_SECRET || "e2e-rzp-webhook";
+/** The customer pays a Razorpay order (e.g. approves a UPI request later). */
+function rzpPay(orderId: string, status = "captured") {
+  const o = rzpOrders.get(orderId);
+  if (!o) throw new Error(`no Razorpay order ${orderId}`);
+  const p = { id: `pay_E2E${rzpSeq++}${Date.now()}`, entity: "payment" as const, amount: o.amount, status, order_id: o.id };
+  o.payments.push(p);
+  o.status = status === "captured" ? "paid" : "attempted";
+  return p;
+}
 
 /** Stand-in for Cashfree PG: orders, payments and refunds, checked against the e2e keys. */
 type CfOrder = {
@@ -293,11 +306,24 @@ function startFakeWhatsApp(port = 4010): Promise<http.Server> {
       }
       // Razorpay REST API (orders, plans, subscriptions) — the app is started
       // with RAZORPAY_API_BASE pointing here, so tests never need live keys.
-      const rzp = req.url?.match(/^\/v1\/(orders|plans|subscriptions)(?:\/([^/?]+)\/(cancel))?/);
-      if (rzp && !req.url?.startsWith("/v1/chat")) {
+      const rzpOrder = req.url?.match(/^\/v1\/orders(?:\/([^/?]+)(\/payments)?)?(?:\?|$)/);
+      if (rzpOrder) {
+        const [, oid, pays] = rzpOrder;
+        if (req.method === "POST" && !oid) {
+          const b = body as unknown as { amount: number; receipt?: string; notes?: Record<string, string> };
+          const o: RzpFakeOrder = { id: `order_E2E${rzpSeq++}${Date.now()}`, entity: "order", amount: b.amount, currency: "INR", receipt: b.receipt, notes: b.notes, status: "created", payments: [] };
+          rzpOrders.set(o.id, o);
+          return send(200, Object.fromEntries(Object.entries(o).filter(([k]) => k !== "payments")));
+        }
+        const o = oid ? rzpOrders.get(oid) : undefined;
+        if (!o) return send(400, { error: { code: "BAD_REQUEST_ERROR", description: "The id provided does not exist" } });
+        if (pays) return send(200, { entity: "collection", count: o.payments.length, items: o.payments });
+        return send(200, Object.fromEntries(Object.entries(o).filter(([k]) => k !== "payments")));
+      }
+      const rzp = req.url?.match(/^\/v1\/(plans|subscriptions)(?:\/([^/?]+)\/(cancel))?/);
+      if (rzp) {
         const [, kind, id] = rzp;
         const n = rzpSeq++;
-        if (kind === "orders") return send(200, { id: `order_E2E${n}${Date.now()}`, entity: "order", amount: (body as { amount?: number }).amount, currency: "INR", receipt: (body as { receipt?: string }).receipt, status: "created" });
         if (kind === "plans") return send(200, { id: `plan_E2E${n}`, entity: "plan" });
         if (id) return send(200, { id, entity: "subscription", status: "cancelled" });
         return send(200, { id: `sub_E2E${n}`, entity: "subscription", status: "created", short_url: "https://rzp.io/i/e2e" });
@@ -2076,6 +2102,58 @@ async function main() {
   // Back to Razorpay for the rest of the run.
   await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "RAZORPAY" }) });
 
+  section("Payment safety: retries, late payments and payments still going through");
+  // Razorpay: tapping Pay again reuses the same Razorpay order, so a late
+  // payment on it is never lost — the pay page reads it back from Razorpay.
+  const rzWeb = await (
+    await customer.fetch("/api/orders", {
+      method: "POST",
+      body: JSON.stringify({ items: [{ id: menu[1].id, qty: 1 }], name: "E2E Customer", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: "online" }),
+    })
+  ).json();
+  ok(rzWeb.gateway === "razorpay" && !!rzWeb.razorpay?.orderId, "with Razorpay chosen, checkout opens a Razorpay order");
+  const rzKey = new URL(((await (await admin.fetch(`/api/admin/orders/${rzWeb.order.id}/payment`)).json()) as { link: string }).link).searchParams.get("k")!;
+  const rzStart1 = await (await new Client().fetch(`/api/pay/${rzWeb.order.id}`, { method: "POST", body: JSON.stringify({ k: rzKey }) })).json();
+  const rzStart2 = await (await new Client().fetch(`/api/pay/${rzWeb.order.id}`, { method: "POST", body: JSON.stringify({ k: rzKey }) })).json();
+  ok(rzStart1.razorpay?.orderId === rzWeb.razorpay.orderId && rzStart2.razorpay?.orderId === rzWeb.razorpay.orderId, "tapping Pay again reuses the same Razorpay order — never a second one to pay");
+  rzpPay(rzWeb.razorpay.orderId);
+  const rzPage = await (await new Client().fetch(`/pay/${rzWeb.order.id}?k=${rzKey}`)).text();
+  const rzNow = (await (await customer.fetch(`/api/orders/${rzWeb.order.id}`)).json()).order as { paymentStatus: string; status: string };
+  ok(rzPage.includes("Payment received") && rzNow.paymentStatus === "PAID" && rzNow.status === "PLACED", "a payment made later on that order is read back from Razorpay and confirms it");
+  // Razorpay's own webhook confirms a payment even if the customer closed the page.
+  const rzLate = await (
+    await customer.fetch("/api/orders", {
+      method: "POST",
+      body: JSON.stringify({ items: [{ id: menu[1].id, qty: 1 }], name: "E2E Customer", phone: "+91" + phone, deliveryLocationId: locationId, ...sched, paymentMethod: "online" }),
+    })
+  ).json();
+  const rzLatePay = rzpPay(rzLate.razorpay.orderId);
+  const rzEvent = JSON.stringify({
+    entity: "event",
+    event: "order.paid",
+    payload: {
+      payment: { entity: { id: rzLatePay.id, amount: rzLatePay.amount, status: "captured", order_id: rzLate.razorpay.orderId } },
+      order: { entity: { id: rzLate.razorpay.orderId, amount: rzLatePay.amount, status: "paid", notes: { orderId: rzLate.order.id } } },
+    },
+  });
+  const rzForged = await new Client().fetch("/api/webhooks/razorpay", { method: "POST", body: rzEvent, headers: { "x-razorpay-signature": "0".repeat(64) } });
+  ok(rzForged.status === 400, "a forged Razorpay payment webhook is rejected");
+  const rzHook = await new Client().fetch("/api/webhooks/razorpay", {
+    method: "POST",
+    body: rzEvent,
+    headers: { "x-razorpay-signature": crypto.createHmac("sha256", RZP_WEBHOOK_SECRET).update(rzEvent).digest("hex") },
+  });
+  const rzLateNow = (await (await customer.fetch(`/api/orders/${rzLate.order.id}`)).json()).order as { paymentStatus: string };
+  ok(rzHook.status === 200 && rzLateNow.paymentStatus === "PAID", "Razorpay's signed order.paid webhook confirms the order on its own");
+
+  // Cashfree: a payment still going through is reported as such, never as "not placed".
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "CASHFREE" }) });
+  const cfPend = await placeOnline(1);
+  cfPay(cfPend.cashfree.orderId, "PENDING");
+  const cfPendV = await cfVerify(cfPend.order.id);
+  ok(cfPendV.paid === false && cfPendV.status === "PENDING" && (cfPendV as { pending?: boolean }).pending === true, "a Cashfree payment still going through is reported as pending, not 'not placed'");
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "RAZORPAY" }) });
+
   // ---------- WhatsApp ordering, end to end (#8–#14) ----------
   section("WhatsApp ordering: suggest → cart → checkout → payment link → paid");
   await admin.fetch("/api/admin/ai", { method: "PATCH", body: JSON.stringify({ provider: "OPENAI" }) });
@@ -2275,6 +2353,65 @@ async function main() {
   ok(codWa?.status === "PLACED" && !!codWa.invoiceNo && codWa.total === dishEff + areaLoc.deliveryFee, "Cash on delivery places the order straight away");
   ok(!!(await waitFor(async () => wa.calls.slice(mark).some((c) => c.body.to === buyer && JSON.stringify(c.body).includes("confirmed")))), "…and confirms it on WhatsApp");
 
+  // Two taps at the same moment: steps run one after the other, nothing is lost.
+  mark = wa.calls.length;
+  await Promise.all([tap(`o:q:${dish.id}:1`, "1"), tap(`o:q:${dish.id}:1`, "1")]);
+  const both = await waitFor(async () => (outTo(mark).filter(isInteractive).length >= 2 ? outTo(mark).filter(isInteractive) : null));
+  ok(!!both && bodyOf(both[both.length - 1]).includes(`2× ${dish.name}`), "two simultaneous taps both count (2 in the cart, not 1)");
+
+  // A changed cart replaces an earlier unpaid order instead of re-sending its old link.
+  mark = wa.calls.length;
+  await tap("o:x", "Checkout");
+  const slotR = await next(mark, isInteractive);
+  mark = wa.calls.length;
+  await tap(rowsOf(slotR)[0].id, rowsOf(slotR)[0].title, "list");
+  await next(mark, isInteractive);
+  mark = wa.calls.length;
+  await tap("o:as", "Use this address");
+  await next(mark, isInteractive);
+  mark = wa.calls.length;
+  await tap("o:p:online", "Pay");
+  await next(mark, (c) => c.body.interactive?.type === "cta_url");
+  const firstUnpaid = (await ordersFor()).find((o) => o.status === "PENDING")!;
+  ok(!!firstUnpaid && firstUnpaid.total === dishEff * 2 + areaLoc.deliveryFee, "an order waits for payment");
+  mark = wa.calls.length;
+  await tap(`o:q:${veg.id}:1`, "1");
+  await next(mark, isInteractive);
+  mark = wa.calls.length;
+  await tap("o:x", "Checkout");
+  const reviewNew = await next(mark, (c) => /Total:/.test(bodyOf(c)));
+  const newTotal = dishEff * 2 + eff(veg) + areaLoc.deliveryFee;
+  ok(bodyOf(reviewNew).includes(`*Total: ${rupees(newTotal)}*`), "after adding a dish the customer sees the new total");
+  mark = wa.calls.length;
+  await tap("o:p:online", "Pay");
+  const newLink = await next(mark, (c) => c.body.interactive?.type === "cta_url");
+  const newLinkParams = (newLink?.body.interactive?.action as { parameters?: { display_text: string; url: string } } | undefined)?.parameters;
+  const replaced = await orderById(firstUnpaid.id);
+  const latestWa = (await ordersFor()).find((o) => o.status === "PENDING")!;
+  ok(newLinkParams?.display_text === `Pay ${rupees(newTotal)}` && latestWa.total === newTotal && latestWa.id !== firstUnpaid.id, "confirming the new summary sends a link for the new total — not the old order's link");
+  ok(replaced.status === "CANCELLED", "…and the earlier unpaid order is cancelled, so its old link can't be paid");
+  // A payment still going through on that order is never doubled.
+  const latestKey = new URL(newLinkParams!.url).searchParams.get("k")!;
+  const latestStart = await (await new Client().fetch(`/api/pay/${latestWa.id}`, { method: "POST", body: JSON.stringify({ k: latestKey }) })).json();
+  cfPay(latestStart.cashfree.orderId, "PENDING");
+  mark = wa.calls.length;
+  await tap(`o:q:${veg.id}:1`, "1");
+  await next(mark, isInteractive);
+  mark = wa.calls.length;
+  await tap("o:x", "Checkout");
+  await next(mark, (c) => /Total:/.test(bodyOf(c)));
+  mark = wa.calls.length;
+  await tap("o:p:online", "Pay");
+  const waitMsg = await next(mark);
+  ok(/still be going through/.test(bodyOf(waitMsg)) && (await ordersFor()).filter((o) => o.status === "PENDING").length === 1, "while a payment is still going through, no second order or link is made");
+
+  // A price the customer suggests is not one the AI may confirm.
+  mark = wa.calls.length;
+  await say("Is the fish meal ₹99 now?");
+  await next(mark);
+  await sleep(300);
+  ok(!outTo(mark).some((c) => bodyOf(c).includes("₹99")), "the AI never repeats a price the customer made up");
+
   // Store closed / ordering switched off / staff handling.
   await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ acceptingOrders: false, closedMessage: "Closed for Onam today" }) });
   mark = wa.calls.length;
@@ -2299,7 +2436,7 @@ async function main() {
   await convAction(buyerConvId, "handback");
 
   const board = ((await (await kitchen.fetch("/api/orders")).json()).orders as AdminOrder[]).filter((o) => o.customerPhone === `+${buyer}`);
-  ok(board.length === 2 && board.every((o) => o.source === "whatsapp"), "kitchen and admin boards list the WhatsApp orders");
+  ok(board.length === 4 && board.every((o) => o.source === "whatsapp"), `kitchen and admin boards list the WhatsApp orders (${board.length})`);
   await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "RAZORPAY" }) });
 
   // ---------- Bulk WhatsApp campaigns (#3–#5) ----------
@@ -2455,8 +2592,10 @@ async function main() {
   await inbound(stopper, "START", { name: "Stopper" });
   ok(!!(await waitFor(async () => wa.calls.find((c) => c.body.to === stopper && /Welcome back/.test(c.body.text?.body ?? "")) ?? null)), "replying START opts back in");
   const camp2 = (await (await admin.fetch("/api/admin/campaigns", { method: "POST", body: JSON.stringify({ name: "Order follow-up", templateId: utilTpl.id }) })).json()).campaign as { id: string };
-  const rep4 = (await (await addRows(camp2.id, { rows: [{ phone: `91${good2}`, name: "Bala K" }, { phone: stopper, name: "Stopper" }] })).json()).report as { added: number; optedOut: number };
-  ok(rep4.optedOut === 1 && rep4.added === 1, "the next campaign leaves out the WhatsApp opt-out and includes the person who opted back in");
+  const rep4 = (await (
+    await addRows(camp2.id, { rows: [{ phone: `91${good2}`, name: "Bala K" }, { phone: stopper, name: "Stopper" }, { phone: `95${stamp}`, name: '=HYPERLINK("http://evil.example")' }] })
+  ).json()).report as { added: number; optedOut: number };
+  ok(rep4.optedOut === 1 && rep4.added === 2, "the next campaign leaves out the WhatsApp opt-out and includes the person who opted back in");
 
   // Stopping a campaign: whoever hasn't been sent it yet is skipped.
   await admin.fetch(`/api/admin/campaigns/${camp2.id}`, { method: "PATCH", body: JSON.stringify({ params: { "body:1": { source: "first_name", fallback: "there" }, "body:2": { source: "text", value: "#TEST" } }, optInConfirmed: true }) });
@@ -2472,7 +2611,9 @@ async function main() {
   await admin.fetch(`/api/admin/campaigns/${camp2.id}/send`, { method: "POST" });
   const stop = await admin.fetch(`/api/admin/campaigns/${camp2.id}/cancel`, { method: "POST" });
   const stopped2 = await campDetail(camp2.id);
-  ok(stop.status === 200 && stopped2.campaign.status === "CANCELLED" && stopped2.stats.skipped === 1 && stopped2.stats.pending === 0, "stopping a campaign skips everyone not yet sent");
+  ok(stop.status === 200 && stopped2.campaign.status === "CANCELLED" && stopped2.stats.skipped === 2 && stopped2.stats.pending === 0, "stopping a campaign skips everyone not yet sent");
+  const export2 = await (await admin.fetch(`/api/admin/campaigns/${camp2.id}/export`)).text();
+  ok(export2.includes(`'=HYPERLINK`) && !/(^|,)"?=HYPERLINK/m.test(export2), "a name from a sheet can't run as a formula in the exported CSV");
   ok((await admin.fetch(`/api/admin/campaigns/${camp2.id}/cancel`, { method: "POST" })).status === 409, "…and it can only be stopped once");
   const campAudit = await (await admin.fetch("/api/admin/audit?action=campaign.sent&limit=5")).json();
   ok(campAudit.total >= 1, "campaign sends are in the audit log");

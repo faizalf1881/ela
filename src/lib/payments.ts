@@ -4,7 +4,7 @@ import { after } from "next/server";
 import { prisma } from "./db";
 import { audit, type AuditActor } from "./audit";
 import { razorpay } from "./razorpay";
-import { cashfreeConfigured, cashfreeMode, createCashfreeOrder, createCashfreeRefund, getCashfreeOrder, getCashfreePayments, type CashfreeMode } from "./cashfree";
+import { CashfreeError, cashfreeConfigured, cashfreeMode, createCashfreeOrder, createCashfreeRefund, getCashfreeOrder, getCashfreePayments, type CashfreeMode, type CashfreeOrder } from "./cashfree";
 import { finalizeOrder } from "./fulfillment";
 import { dateKeyFromDb, istDateKey, istMinutesNow } from "./delivery";
 import { notifyNewOrderToAdmin, notifyOrderStatus } from "./notify";
@@ -57,12 +57,20 @@ export function siteUrl(): string {
  * link lets someone pay for that one order and see its summary — nothing else.
  */
 export function payToken(orderId: string): string {
-  const secret = process.env.JWT_SECRET || "";
+  const secret = process.env.JWT_SECRET;
+  // Never sign with a guessable key: without the secret, links simply don't work.
+  if (!secret || secret.length < 16) throw new Error("JWT_SECRET is not set (min 16 chars) — payment links can't be signed.");
   return crypto.createHmac("sha256", secret).update(`pay:${orderId}`).digest("base64url").slice(0, 32);
 }
 export function validPayToken(orderId: string, token: string | null | undefined): boolean {
   if (!token) return false;
-  const a = Buffer.from(payToken(orderId));
+  let expected: string;
+  try {
+    expected = payToken(orderId);
+  } catch {
+    return false;
+  }
+  const a = Buffer.from(expected);
   const b = Buffer.from(token);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
@@ -79,6 +87,7 @@ type PayableOrder = {
   total: number;
   codBalanceDue: number;
   cashfreeOrderId: string | null;
+  razorpayOrderId: string | null;
 };
 
 /** What is collected online: the whole order, or just the COD confirmation slice. */
@@ -119,6 +128,15 @@ export async function startOnlinePayment(order: PayableOrder, gateway: Gateway, 
   const ref = `#${order.id.slice(-6).toUpperCase()}`;
 
   if (gateway === "razorpay") {
+    // Reuse the Razorpay order this order already has: a second one could be
+    // paid as well, and a payment on the first would then never be credited.
+    if (order.razorpayOrderId) {
+      const existing = await fetchRazorpayOrder(order.razorpayOrderId);
+      if (existing?.status === "paid") throw new AlreadyPaidError();
+      if (existing && Number(existing.amount) === amount * 100) {
+        return { gateway, razorpay: { orderId: existing.id, amount: Number(existing.amount), currency: existing.currency, keyId: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || process.env.RAZORPAY_KEY_ID } };
+      }
+    }
     const rp = await razorpay().orders.create({
       amount: amount * 100,
       currency: "INR",
@@ -132,7 +150,14 @@ export async function startOnlinePayment(order: PayableOrder, gateway: Gateway, 
   // Reuse an attempt that can still be paid: opening a second one while the
   // first might yet succeed is how customers end up paying twice.
   if (order.cashfreeOrderId) {
-    const existing = await getCashfreeOrder(order.cashfreeOrderId).catch(() => null);
+    let existing: CashfreeOrder | null = null;
+    try {
+      existing = await getCashfreeOrder(order.cashfreeOrderId);
+    } catch (e) {
+      // Only a definite "no such order" lets a new attempt open. If Cashfree
+      // can't be reached, the old one might still be paid — don't risk two.
+      if (!(e instanceof CashfreeError && e.status >= 400 && e.status < 500)) throw e;
+    }
     if (existing?.order_status === "PAID") throw new AlreadyPaidError();
     if (existing?.order_status === "ACTIVE" && Number(existing.order_amount) === amount && existing.payment_session_id) {
       return { gateway, cashfree: { paymentSessionId: existing.payment_session_id, mode: cashfreeMode(), orderId: existing.order_id } };
@@ -154,6 +179,7 @@ export async function startOnlinePayment(order: PayableOrder, gateway: Gateway, 
 }
 
 export type SettleResult = { ok: true; order: Awaited<ReturnType<typeof finalizeOrder>>; already: boolean } | { ok: false; reason: "not_found" | "amount_mismatch" };
+type Via = "checkout" | "webhook" | "pay-page" | "admin-check" | "whatsapp";
 
 /**
  * Records a gateway-confirmed payment, exactly once: the order moves to paid
@@ -168,7 +194,9 @@ export async function settleOrderPayment(opts: {
   paymentId: string;
   /** Rupees the gateway says were collected. */
   amount: number;
-  via: "checkout" | "webhook" | "pay-page" | "admin-check";
+  /** The gateway's order the money came in on (recorded, so a refund goes back to it). */
+  gatewayOrderId?: string;
+  via: Via;
   actor: AuditActor;
   req?: Request;
 }): Promise<SettleResult> {
@@ -190,48 +218,55 @@ export async function settleOrderPayment(opts: {
     return { ok: false, reason: "amount_mismatch" };
   }
 
-  const ids = opts.gateway === "razorpay" ? { razorpayPaymentId: opts.paymentId } : { cashfreePaymentId: opts.paymentId };
+  const ids =
+    opts.gateway === "razorpay"
+      ? { razorpayPaymentId: opts.paymentId, ...(opts.gatewayOrderId ? { razorpayOrderId: opts.gatewayOrderId } : {}) }
+      : { cashfreePaymentId: opts.paymentId, ...(opts.gatewayOrderId ? { cashfreeOrderId: opts.gatewayOrderId } : {}) };
   const moved = await prisma.order.updateMany({
     where: { id: order.id, paymentStatus: { in: ["UNPAID", "FAILED"] } },
-    data: {
-      paymentStatus: isCodConfirmation ? "PARTIAL" : "PAID",
-      // Only an order still waiting for payment moves to "confirmed"; one staff
-      // already moved on, or cancelled, keeps its status.
-      ...(order.status === "PENDING" ? { status: "PLACED", statusChangedAt: new Date() } : {}),
-      codConfirmPaid: isCodConfirmation ? due : 0,
-      ...ids,
-    },
+    data: { paymentStatus: isCodConfirmation ? "PARTIAL" : "PAID", codConfirmPaid: isCodConfirmation ? due : 0, ...ids },
   });
 
   if (moved.count === 0) {
     const current = await prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: { items: true } });
-    const known = opts.gateway === "razorpay" ? current.razorpayPaymentId : current.cashfreePaymentId;
-    if (known && known !== opts.paymentId) {
+    const paid = current.paymentStatus === "PAID" || current.paymentStatus === "PARTIAL";
+    const known = [current.razorpayPaymentId, current.cashfreePaymentId].filter((x): x is string => !!x);
+    if (paid && known.length && !known.includes(opts.paymentId)) {
       await audit({
         actor: opts.actor,
         action: "order.duplicate_payment",
         entityType: "order",
         entityId: order.id,
-        summary: `Second payment ${opts.paymentId} (₹${opts.amount}) received for already-paid order #${order.id.slice(-6).toUpperCase()} — refund it from the ${GATEWAY_LABEL[opts.gateway]} dashboard`,
-        metadata: { gateway: opts.gateway, paymentId: opts.paymentId, firstPaymentId: known, amount: opts.amount },
+        summary: `Second payment ${opts.paymentId} (₹${opts.amount}, ${GATEWAY_LABEL[opts.gateway]}) received for already-paid order #${order.id.slice(-6).toUpperCase()} — refund it from the ${GATEWAY_LABEL[opts.gateway]} dashboard`,
+        metadata: { gateway: opts.gateway, paymentId: opts.paymentId, firstPaymentIds: known, amount: opts.amount },
         req: opts.req,
       });
     }
+    // The payment was recorded before but finishing it failed (a retried webhook
+    // brings us back): finish now, so the order isn't stuck without an invoice.
+    if (paid && !current.invoiceNo && known.includes(opts.paymentId)) return finishPaidOrder(order.id, opts, due, isCodConfirmation);
     return { ok: true, order: current, already: true };
   }
+  return finishPaidOrder(order.id, opts, due, isCodConfirmation);
+}
 
-  const updated = await finalizeOrder(order.id);
-  const ref = `#${order.id.slice(-6).toUpperCase()}`;
+/** After the money is recorded: confirm the order, invoice it, reserve stock, tell everyone. */
+async function finishPaidOrder(orderId: string, opts: { gateway: Gateway; paymentId: string; via: Via; actor: AuditActor; req?: Request }, due: number, isCodConfirmation: boolean): Promise<SettleResult> {
+  // Only an order still waiting for payment becomes "confirmed" — checked in the
+  // write itself, so staff moving it on (or cancelling it) a moment earlier wins.
+  await prisma.order.updateMany({ where: { id: orderId, status: "PENDING" }, data: { status: "PLACED", statusChangedAt: new Date() } });
+  const updated = await finalizeOrder(orderId);
+  const ref = `#${orderId.slice(-6).toUpperCase()}`;
   // A WhatsApp cart that became this order starts afresh (the area and name are kept; the address is offered again).
   await prisma.waOrderDraft.updateMany({
-    where: { orderId: order.id },
+    where: { orderId },
     data: { items: [], step: "BROWSING", quotedTotal: null, orderId: null, deliveryDate: null, deliverySlotId: null, address: null },
   });
   await audit({
     actor: opts.actor,
     action: "order.paid",
     entityType: "order",
-    entityId: order.id,
+    entityId: orderId,
     summary: isCodConfirmation
       ? `COD confirmation of ₹${due} verified (${GATEWAY_LABEL[opts.gateway]}) — ₹${updated.codBalanceDue} due on delivery (${updated.invoiceNo})`
       : `Payment verified — ₹${updated.total} via ${GATEWAY_LABEL[opts.gateway]} (${updated.invoiceNo})`,
@@ -239,46 +274,100 @@ export async function settleOrderPayment(opts: {
     req: opts.req,
   });
 
-  if (order.status === "CANCELLED") {
+  if (updated.status === "CANCELLED") {
     await audit({
       actor: { type: "system", label: "payments" },
       action: "order.paid_after_cancel",
       entityType: "order",
-      entityId: order.id,
+      entityId: orderId,
       summary: `Order ${ref} was paid after it had been cancelled — refund ₹${due} from Orders`,
       metadata: { gateway: opts.gateway, paymentId: opts.paymentId, amount: due },
     });
   } else {
-    // Messages go out after the response, so a slow WhatsApp never delays a payment.
-    after(async () => {
+    // Messages go out after the response, so a slow WhatsApp never delays a
+    // payment. (Already running after a response — e.g. a WhatsApp reply — they
+    // are simply sent now.)
+    const tell = async () => {
       await notifyOrderStatus(updated.id, "PENDING");
       await notifyNewOrderToAdmin(updated);
-    });
+    };
+    try {
+      after(tell);
+    } catch {
+      await tell().catch(() => {});
+    }
   }
   return { ok: true, order: updated, already: false };
 }
 
+export type PaymentCheck = { paid: boolean; status: string; order?: Awaited<ReturnType<typeof finalizeOrder>> };
+
+const FAILED_STATES = ["FAILED", "USER_DROPPED", "CANCELLED", "VOID"];
+
 /**
  * Reads the order back from Cashfree and records the payment if Cashfree says
- * it is PAID. Safe to call any number of times.
+ * it is PAID. A payment still going through comes back as PENDING — the
+ * customer must not be told the order wasn't placed. Safe to repeat.
  */
-export async function confirmCashfreePayment(
-  order: { id: string; cashfreeOrderId: string | null },
-  actor: AuditActor,
-  via: "checkout" | "pay-page" | "admin-check",
-  req?: Request,
-): Promise<{ paid: boolean; status: string; order?: Awaited<ReturnType<typeof finalizeOrder>> }> {
+export async function confirmCashfreePayment(order: { id: string; cashfreeOrderId: string | null }, actor: AuditActor, via: Via, req?: Request): Promise<PaymentCheck> {
   if (!order.cashfreeOrderId) return { paid: false, status: "NO_PAYMENT" };
   const cf = await getCashfreeOrder(order.cashfreeOrderId);
-  if (cf.order_status !== "PAID") {
-    const payments = await getCashfreePayments(order.cashfreeOrderId).catch(() => []);
-    const last = payments[0];
-    return { paid: false, status: last?.payment_status === "FAILED" || last?.payment_status === "USER_DROPPED" ? "FAILED" : cf.order_status };
+  const payments = await getCashfreePayments(order.cashfreeOrderId).catch(() => []);
+  if (cf.order_status === "PAID") {
+    const success = payments.find((p) => p.payment_status === "SUCCESS");
+    if (!success) return { paid: false, status: "PENDING" };
+    const r = await settleOrderPayment({ orderId: order.id, gateway: "cashfree", paymentId: String(success.cf_payment_id), amount: Number(success.payment_amount), gatewayOrderId: order.cashfreeOrderId, via, actor, req });
+    return r.ok ? { paid: true, status: "PAID", order: r.order } : { paid: false, status: r.reason.toUpperCase() };
   }
-  const success = (await getCashfreePayments(order.cashfreeOrderId)).find((p) => p.payment_status === "SUCCESS");
-  if (!success) return { paid: false, status: "PENDING" };
-  const r = await settleOrderPayment({ orderId: order.id, gateway: "cashfree", paymentId: String(success.cf_payment_id), amount: Number(success.payment_amount), via, actor, req });
-  return r.ok ? { paid: true, status: "PAID", order: r.order } : { paid: false, status: r.reason.toUpperCase() };
+  if (payments.some((p) => p.payment_status === "PENDING")) return { paid: false, status: "PENDING" };
+  if (payments.length && payments.every((p) => FAILED_STATES.includes(p.payment_status))) return { paid: false, status: "FAILED" };
+  return { paid: false, status: cf.order_status };
+}
+
+type RzpOrder = { id: string; amount: number | string; currency: string; status: "created" | "attempted" | "paid" };
+type RzpPayment = { id: string; amount: number | string; status: "created" | "authorized" | "captured" | "refunded" | "failed" };
+
+/** A Razorpay order, or null when Razorpay says it doesn't exist (e.g. made with other keys). */
+async function fetchRazorpayOrder(id: string): Promise<RzpOrder | null> {
+  try {
+    return (await razorpay().orders.fetch(id)) as unknown as RzpOrder;
+  } catch (e) {
+    const code = (e as { statusCode?: number }).statusCode ?? 0;
+    if (code >= 400 && code < 500) return null;
+    throw e;
+  }
+}
+
+/** Reads the order back from Razorpay and records a captured payment. Safe to repeat. */
+export async function confirmRazorpayPayment(order: { id: string; razorpayOrderId: string | null }, actor: AuditActor, via: Via, req?: Request): Promise<PaymentCheck> {
+  if (!order.razorpayOrderId) return { paid: false, status: "NO_PAYMENT" };
+  const rp = await fetchRazorpayOrder(order.razorpayOrderId);
+  if (!rp) return { paid: false, status: "NO_PAYMENT" };
+  const payments = ((await razorpay().orders.fetchPayments(order.razorpayOrderId)) as unknown as { items?: RzpPayment[] }).items ?? [];
+  const captured = payments.find((p) => p.status === "captured");
+  if (captured) {
+    const r = await settleOrderPayment({ orderId: order.id, gateway: "razorpay", paymentId: captured.id, amount: Number(captured.amount) / 100, gatewayOrderId: rp.id, via, actor, req });
+    return r.ok ? { paid: true, status: "PAID", order: r.order } : { paid: false, status: r.reason.toUpperCase() };
+  }
+  if (rp.status === "paid" || payments.some((p) => p.status === "authorized" || p.status === "created")) return { paid: false, status: "PENDING" };
+  if (payments.length && payments.every((p) => p.status === "failed")) return { paid: false, status: "FAILED" };
+  return { paid: false, status: rp.status.toUpperCase() };
+}
+
+/**
+ * Asks whichever gateway(s) the order went to whether it has been paid, and
+ * records the payment if so. PAID beats PENDING beats anything else.
+ */
+export async function reconcilePayment(
+  order: { id: string; cashfreeOrderId: string | null; razorpayOrderId: string | null },
+  actor: AuditActor,
+  via: Via,
+  req?: Request,
+): Promise<PaymentCheck> {
+  const checks: PaymentCheck[] = [];
+  if (order.cashfreeOrderId && cashfreeConfigured()) checks.push(await confirmCashfreePayment(order, actor, via, req));
+  if (!checks.some((c) => c.paid) && order.razorpayOrderId && gatewayAvailability().razorpay.configured) checks.push(await confirmRazorpayPayment(order, actor, via, req));
+  return checks.find((c) => c.paid) ?? checks.find((c) => c.status === "PENDING") ?? checks.find((c) => c.status !== "NO_PAYMENT") ?? { paid: false, status: "NO_PAYMENT" };
 }
 
 export class RefundError extends Error {

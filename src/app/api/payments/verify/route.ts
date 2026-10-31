@@ -62,6 +62,7 @@ export async function POST(req: Request) {
     gateway: "razorpay",
     paymentId: razorpay_payment_id,
     amount: onlineAmountDue(order),
+    gatewayOrderId: razorpay_order_id,
     via: "checkout",
     actor: actorFrom(s),
     req,

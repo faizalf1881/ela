@@ -3,17 +3,21 @@ import { prisma } from "@/lib/db";
 import { verifyWebhookSignature } from "@/lib/razorpay";
 import { addCycle } from "@/lib/membership";
 import { audit } from "@/lib/audit";
+import { settleOrderPayment } from "@/lib/payments";
 
 export const runtime = "nodejs";
 
 type RzpSubscriptionEntity = { id: string; current_end?: number; status?: string };
-type RzpPaymentEntity = { id: string; amount?: number };
+type RzpPaymentEntity = { id: string; amount?: number; status?: string; order_id?: string };
+type RzpOrderEntity = { id: string; notes?: Record<string, string> | null };
 
 /**
  * POST /api/webhooks/razorpay — recurring-billing events.
  * Keeps memberships in sync when Razorpay auto-charges (or fails to charge)
  * the customer's mandate. Configure this URL + RAZORPAY_WEBHOOK_SECRET in the
- * Razorpay dashboard with the subscription.* events enabled.
+ * Razorpay dashboard with the subscription.* events enabled — and order.paid,
+ * so an order is confirmed even if the customer closes the page right after
+ * paying.
  */
 export async function POST(req: Request) {
   const raw = await req.text();
@@ -28,6 +32,7 @@ export async function POST(req: Request) {
     payload?: {
       subscription?: { entity?: RzpSubscriptionEntity };
       payment?: { entity?: RzpPaymentEntity };
+      order?: { entity?: RzpOrderEntity };
     };
   };
   try {
@@ -37,6 +42,32 @@ export async function POST(req: Request) {
   }
 
   const name = event.event || "";
+
+  // A one-off order payment. The order is found from what we set on the server
+  // (the Razorpay order's notes, or its id) — never from payment notes, which
+  // the paying browser can choose.
+  if (name === "order.paid" || name === "payment.captured") {
+    const pay = event.payload?.payment?.entity;
+    const rzpOrder = event.payload?.order?.entity;
+    const rzpOrderId = rzpOrder?.id || pay?.order_id;
+    if (!pay?.id || pay.status !== "captured" || !rzpOrderId) return NextResponse.json({ ok: true, ignored: name });
+    const ours = rzpOrder?.notes?.orderId
+      ? await prisma.order.findUnique({ where: { id: rzpOrder.notes.orderId } })
+      : await prisma.order.findFirst({ where: { razorpayOrderId: rzpOrderId } });
+    if (!ours) return NextResponse.json({ ok: true, unknown: rzpOrderId });
+    const r = await settleOrderPayment({
+      orderId: ours.id,
+      gateway: "razorpay",
+      paymentId: pay.id,
+      amount: Number(pay.amount ?? 0) / 100,
+      gatewayOrderId: rzpOrderId,
+      via: "webhook",
+      actor: { type: "system", label: "razorpay-webhook" },
+      req,
+    });
+    return NextResponse.json({ ok: true, settled: r.ok, already: r.ok ? r.already : undefined });
+  }
+
   const rzpSub = event.payload?.subscription?.entity;
   const rzpPayment = event.payload?.payment?.entity;
   if (!rzpSub?.id) return NextResponse.json({ ok: true, ignored: name });

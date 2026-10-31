@@ -142,7 +142,7 @@ export function CampaignEditor({ id, health, onBack }: { id: string; health: Hea
       {!draft && <LiveStats d={d} onResume={() => call("resume", `/api/admin/campaigns/${id}/send`, { method: "POST" }, "Sending resumed")} busy={busy === "resume"} />}
 
       {draft ? (
-        <div className="mt-5 grid gap-4 lg:grid-cols-2">
+        <div className="mt-5 grid items-start gap-4 lg:grid-cols-2">
           <RecipientsStep d={d} id={id} reload={load} />
           <MessageStep d={d} id={id} reload={load} />
           <ReviewStep d={d} id={id} health={health} call={call} busy={busy} />
