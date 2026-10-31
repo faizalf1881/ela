@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import { NextResponse, after } from "next/server";
+import { prisma } from "@/lib/db";
 import { applyDeliveryReceipt } from "@/lib/order-notify";
-import { aiReply, applyChatReceipt, recordInbound } from "@/lib/wa-chat";
+import { aiReply, applyChatReceipt, recordInbound, sendChatMessage } from "@/lib/wa-chat";
+import { applyCampaignReceipt, optIn, optKeyword, optOut } from "@/lib/campaigns";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,7 +16,7 @@ export const maxDuration = 60;
  * Meta → your app → WhatsApp → Configuration → Webhook:
  *   Callback URL:  https://YOUR-DOMAIN/api/webhooks/whatsapp
  *   Verify token:  the value of WHATSAPP_VERIFY_TOKEN
- *   Subscribe to:  messages
+ *   Subscribe to:  messages, and user_preferences (marketing opt-outs)
  * Every POST is signed with the app secret (WHATSAPP_APP_SECRET); unsigned or
  * mis-signed requests are rejected, so events cannot be forged.
  */
@@ -39,7 +41,8 @@ function validSignature(raw: string, header: string | null, secret: string): boo
 
 type Receipt = { id: string; status: string; timestamp?: string; recipient_id?: string; errors?: { code?: number; title?: string; message?: string }[] };
 type Contact = { wa_id?: string; profile?: { name?: string } };
-type ChangeValue = { statuses?: Receipt[]; messages?: Parameters<typeof recordInbound>[0][]; contacts?: Contact[] };
+type Preference = { wa_id?: string; category?: string; value?: string; detail?: string };
+type ChangeValue = { statuses?: Receipt[]; messages?: Parameters<typeof recordInbound>[0][]; contacts?: Contact[]; user_preferences?: Preference[] };
 type Payload = { object?: string; entry?: { changes?: { field?: string; value?: ChangeValue }[] }[] };
 
 export async function POST(req: Request) {
@@ -63,15 +66,29 @@ export async function POST(req: Request) {
 
   let receipts = 0;
   let messages = 0;
+  let preferences = 0;
   for (const entry of payload.entry ?? []) {
     for (const change of entry.changes ?? []) {
-      if (change.field !== "messages" || !change.value) continue;
+      if (!change.value) continue;
       const v = change.value;
 
-      // Receipts belong either to an order update or to a chat reply.
+      // WhatsApp's own "stop marketing" / "resume" choice (spec #16: respect every opt-out).
+      if (change.field === "user_preferences") {
+        for (const p of v.user_preferences ?? []) {
+          if (p.category !== "marketing_messages" || !p.wa_id) continue;
+          if (p.value === "stop") await optOut(p.wa_id, "whatsapp");
+          else if (p.value === "resume") await optIn(p.wa_id);
+          else continue;
+          preferences++;
+        }
+        continue;
+      }
+      if (change.field !== "messages") continue;
+
+      // Receipts belong to an order update, a chat reply or a campaign message.
       for (const r of v.statuses ?? []) {
         if (!r?.id || !r?.status) continue;
-        if ((await applyDeliveryReceipt(r)) || (await applyChatReceipt(r))) receipts++;
+        if ((await applyDeliveryReceipt(r)) || (await applyChatReceipt(r)) || (await applyCampaignReceipt(r))) receipts++;
       }
 
       // Customer messages → the CRM chat; the AI answers after this response.
@@ -80,11 +97,21 @@ export async function POST(req: Request) {
         const saved = await recordInbound(m, profile);
         if (!saved) continue; // redelivered — already handled
         messages++;
-        if (saved.mode === "AI") after(() => aiReply(saved.conversationId, saved.messageId));
+        const text = m.type === "text" ? (m.text?.body ?? "") : m.type === "button" ? (m.button?.text ?? "") : (m.interactive?.button_reply?.title ?? "");
+        after(async () => {
+          // STOP / START is honoured in any mode, and never sent to the AI.
+          const confirmation = text ? await optKeyword(m.from, text) : null;
+          if (confirmation) {
+            const conv = await prisma.waConversation.findUnique({ where: { id: saved.conversationId } });
+            if (conv) await sendChatMessage(conv, confirmation, "AI");
+            return;
+          }
+          if (saved.mode === "AI") await aiReply(saved.conversationId, saved.messageId);
+        });
       }
     }
   }
 
   // Always 200 for a verified event: Meta retries anything else for days.
-  return NextResponse.json({ ok: true, receipts, messages });
+  return NextResponse.json({ ok: true, receipts, messages, preferences });
 }

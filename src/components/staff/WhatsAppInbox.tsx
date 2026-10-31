@@ -74,13 +74,22 @@ type Message = {
 };
 type HandlingEvent = { id: string; fromMode: Mode | null; toMode: Mode; fromState: State | null; toState: State; actorType: string; actorLabel: string | null; reason: string | null; createdAt: string };
 type OrderUpdate = { id: string; orderId: string; toStatus: OrderStatus; body: string; createdAt: string; deliveryStatus: string | null };
+type Broadcast = { id: string; campaign: string; status: string; body: string | null; error: string | null; createdAt: string };
 type Context = {
   customer: { id: string; name: string | null; phone: string; address: string | null; notes: string | null; since: string } | null;
   orders: { id: string; ref: string; invoiceNo: string | null; placedAt: string; status: OrderStatus; statusLabel: string; items: string; total: number; payment: string; delivery: string | null; area: string | null }[];
   subscription: { plan: string; kind: string; status: string; price: number; interval: string; renewsAt: string | null; meals: string | null; days: string | null; area: string | null; slot: string | null } | null;
   tickets: { id: string; subject: string; category: string; status: string; updatedAt: string }[];
 };
-type Detail = { conversation: Conversation; messages: Message[]; events: HandlingEvent[]; updates: OrderUpdate[]; context: Context; replyWindow: { open: boolean; endsAt: string | null } };
+type Detail = {
+  conversation: Conversation;
+  messages: Message[];
+  events: HandlingEvent[];
+  updates: OrderUpdate[];
+  broadcasts?: Broadcast[];
+  context: Context;
+  replyWindow: { open: boolean; endsAt: string | null };
+};
 
 export const STATE_META: Record<State, { label: string; dot: string; pill: string }> = {
   REQUIRES_ATTENTION: { label: "Requires attention", dot: "bg-destructive", pill: "bg-destructive/10 text-destructive" },
@@ -207,11 +216,16 @@ export function WhatsAppInbox() {
 
   const timeline = useMemo(() => {
     if (!detail) return [];
-    type Item = { at: string; kind: "msg"; m: Message } | { at: string; kind: "event"; e: HandlingEvent } | { at: string; kind: "update"; u: OrderUpdate };
+    type Item =
+      | { at: string; kind: "msg"; m: Message }
+      | { at: string; kind: "event"; e: HandlingEvent }
+      | { at: string; kind: "update"; u: OrderUpdate }
+      | { at: string; kind: "broadcast"; b: Broadcast };
     const items: Item[] = [
       ...detail.messages.map((m) => ({ at: m.createdAt, kind: "msg" as const, m })),
       ...detail.events.map((e) => ({ at: e.createdAt, kind: "event" as const, e })),
       ...detail.updates.map((u) => ({ at: u.createdAt, kind: "update" as const, u })),
+      ...(detail.broadcasts ?? []).map((b) => ({ at: b.createdAt, kind: "broadcast" as const, b })),
     ];
     return items.sort((a, b) => a.at.localeCompare(b.at));
   }, [detail]);
@@ -496,6 +510,14 @@ export function WhatsAppInbox() {
                     <div key={`e${item.e.id}`} className="flex justify-center">
                       <span className="rounded-full bg-card/90 px-3 py-1 text-center text-[11px] text-muted-foreground shadow-soft">
                         {eventText(item.e)} · {ist(item.at, { hour: "numeric", minute: "2-digit" })}
+                      </span>
+                    </div>
+                  ) : item.kind === "broadcast" ? (
+                    <div key={`b${item.b.id}`} className="flex justify-center">
+                      <span className="max-w-[90%] rounded-xl bg-[#25D366]/10 px-3 py-1.5 text-[11px] text-foreground" title={item.b.body || undefined}>
+                        📣 Campaign &ldquo;{item.b.campaign}&rdquo; {item.b.status === "FAILED" ? `not delivered${item.b.error ? `: ${item.b.error}` : ""}` : `sent (${item.b.status.toLowerCase()})`} ·{" "}
+                        {ist(item.at, { hour: "numeric", minute: "2-digit", day: "numeric", month: "short" })}
+                        {item.b.body && <span className="mt-0.5 block whitespace-pre-wrap text-muted-foreground">{item.b.body.slice(0, 180)}</span>}
                       </span>
                     </div>
                   ) : item.kind === "update" ? (

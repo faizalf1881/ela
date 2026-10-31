@@ -314,7 +314,21 @@ export async function aiReply(conversationId: string, triggerMessageId: string):
       return;
     }
 
-    const history = (await prisma.waMessage.findMany({ where: { conversationId }, orderBy: { createdAt: "desc" }, take: 20 })).reverse();
+    const [recent, broadcast] = await Promise.all([
+      prisma.waMessage.findMany({ where: { conversationId }, orderBy: { createdAt: "desc" }, take: 20 }),
+      // A campaign message they may be replying to ("I want that offer").
+      prisma.waCampaignRecipient.findFirst({
+        where: { phone: conv.phone, status: { in: ["SENT", "DELIVERED", "READ"] }, sentAt: { gt: new Date(Date.now() - 7 * 86_400_000) } },
+        orderBy: { sentAt: "desc" },
+        select: { body: true, sentAt: true },
+      }),
+    ]);
+    const history = [
+      ...recent.map((h) => ({ sender: h.sender, body: h.body, at: h.createdAt })),
+      ...(broadcast?.body && broadcast.sentAt ? [{ sender: "AI" as const, body: `[Offer we sent you on WhatsApp] ${broadcast.body}`, at: broadcast.sentAt }] : []),
+    ]
+      .sort((a, b) => a.at.getTime() - b.at.getTime())
+      .slice(-20);
     const ctx = await customerContext(conv);
     const turns = await buildPrompt({
       ctx,

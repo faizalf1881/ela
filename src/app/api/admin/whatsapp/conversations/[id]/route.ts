@@ -25,7 +25,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   });
   if (!conversation) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const [messages, events, updates, context] = await Promise.all([
+  const [messages, events, updates, context, broadcasts] = await Promise.all([
     prisma.waMessage.findMany({ where: { conversationId: id }, orderBy: { createdAt: "desc" }, take: 200 }),
     prisma.waHandlingEvent.findMany({ where: { conversationId: id }, orderBy: { createdAt: "desc" }, take: 100 }),
     prisma.orderNotification.findMany({
@@ -35,6 +35,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       select: { id: true, orderId: true, toStatus: true, body: true, createdAt: true, deliveryStatus: true },
     }),
     customerContext(conversation),
+    // Bulk campaign messages sent to this number (spec #5).
+    prisma.waCampaignRecipient.findMany({
+      where: { phone: conversation.phone, status: { in: ["SENT", "DELIVERED", "READ", "FAILED"] } },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+      select: { id: true, status: true, body: true, error: true, sentAt: true, createdAt: true, campaign: { select: { name: true } } },
+    }),
   ]);
 
   const windowEndsAt = conversation.lastInboundAt ? new Date(conversation.lastInboundAt.getTime() + REPLY_WINDOW_MS) : null;
@@ -43,6 +50,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     messages: messages.reverse(),
     events: events.reverse(),
     updates: updates.reverse(),
+    broadcasts: broadcasts.reverse().map((b) => ({ id: b.id, campaign: b.campaign.name, status: b.status, body: b.body, error: b.error, createdAt: b.sentAt ?? b.createdAt })),
     context,
     replyWindow: { open: !!windowEndsAt && windowEndsAt.getTime() > Date.now(), endsAt: windowEndsAt },
   });

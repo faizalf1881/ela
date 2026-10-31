@@ -732,9 +732,98 @@ model WaTemplate {
   syncedAt        DateTime @default(now())
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  campaigns       WaCampaign[]
 
   @@unique([name, language])
   @@index([status])
+}
+
+enum CampaignStatus {
+  DRAFT
+  SENDING
+  COMPLETED
+  CANCELLED
+}
+
+enum RecipientStatus {
+  PENDING
+  SENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+  SKIPPED
+}
+
+/// A bulk WhatsApp campaign (spec #3–#5): one approved template sent to many
+/// people, every recipient tracked from sent to delivered and read.
+model WaCampaign {
+  id               String                @id @default(cuid())
+  name             String
+  template         WaTemplate?           @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  templateId       String?
+  /// The template as it was when chosen (kept even if it changes later).
+  templateName     String
+  templateLanguage String
+  templateCategory String
+  templateFormat   String                @default("POSITIONAL")
+  components       Json
+  /// How each template variable is filled for a recipient:
+  /// { "body:1": { source: "name" | "first_name" | "phone" | "column" | "text", value?, fallback? } }
+  params           Json                  @default("{}")
+  status           CampaignStatus        @default(DRAFT)
+  /// The admin confirmed these people agreed to get WhatsApp messages from Ela & Co.
+  optInConfirmed   Boolean               @default(false)
+  createdBy        String?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  /// Sending runs in short batches; a batch holds this so two never run at once.
+  leaseUntil       DateTime?
+  /// Why sending stopped, when it stopped on its own (e.g. an expired token).
+  lastError        String?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  recipients       WaCampaignRecipient[]
+
+  @@index([status])
+}
+
+model WaCampaignRecipient {
+  id          String          @id @default(cuid())
+  campaign    WaCampaign      @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaignId  String
+  /// Digits with country code (WhatsApp's format).
+  phone       String
+  name        String?
+  /// The other columns of the uploaded sheet, for template variables.
+  data        Json?
+  customerId  String?
+  /// file | crm
+  source      String          @default("file")
+  status      RecipientStatus @default(PENDING)
+  /// Exactly what was sent to this person.
+  body        String?
+  waMessageId String?         @unique
+  error       String?
+  errorCode   Int?
+  sentAt      DateTime?
+  deliveredAt DateTime?
+  readAt      DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@unique([campaignId, phone])
+  @@index([campaignId, status])
+  @@index([phone])
+}
+
+/// People who asked not to get marketing messages — by replying STOP, or with
+/// WhatsApp's own "stop" option. Campaigns skip them; START opts back in.
+model WaOptOut {
+  phone     String   @id
+  /// keyword | whatsapp | admin
+  source    String
+  createdAt DateTime @default(now())
 }
 
 /// The AI assistant's configuration (spec #43). A single row. The OpenAI key is

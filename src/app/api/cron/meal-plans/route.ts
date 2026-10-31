@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { generateMealPlanOrders } from "@/lib/meal-plan";
 import { istDateKey } from "@/lib/delivery";
+import { resumeCampaigns } from "@/lib/campaigns";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,7 +30,9 @@ export async function GET(req: Request) {
   // Only a signed-in admin may override a closed store; the scheduled run never does.
   const force = searchParams.get("force") === "1" && (await getSession())?.role === "admin";
   const result = await generateMealPlanOrders(date, { force });
-  return NextResponse.json(result);
+  // The same daily run picks up any WhatsApp campaign that stopped moving.
+  const campaignsResumed = await resumeCampaigns().catch(() => 0);
+  return NextResponse.json({ ...result, campaignsResumed });
 }
 
 export async function POST(req: Request) {

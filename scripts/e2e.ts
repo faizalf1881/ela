@@ -8,6 +8,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";
+import ExcelJS from "exceljs";
 
 const BASE = process.env.E2E_BASE || "http://localhost:3000";
 const LOG = process.env.SERVER_LOG || path.join(process.cwd(), ".next", "e2e-server.log");
@@ -189,7 +190,7 @@ const WA_TEMPLATES = [
   { id: "t3", name: "new_menu_pending", language: "en", status: "PENDING", category: "MARKETING", components: [{ type: "BODY", text: "Our new menu is here!" }] },
   { id: "t4", name: "survey_flow", language: "en", status: "APPROVED", category: "MARKETING", components: [{ type: "BODY", text: "Tell us how we did" }, { type: "BUTTONS", buttons: [{ type: "FLOW", text: "Start survey" }] }] },
 ];
-const wa = { calls: [] as WaCall[], mode: "ok" as "ok" | "fail-auth" | "fail-template" | "fail-window", next: 1 };
+const wa = { calls: [] as WaCall[], mode: "ok" as "ok" | "fail-auth" | "fail-template" | "fail-window", next: 1, failFor: new Map<string, number>() };
 type AiCall = { url: string; body: { model?: string; messages?: { role: string; content: string }[]; format?: string; response_format?: unknown } };
 const ai = { calls: [] as AiCall[], mode: "ok" as "ok" | "fail" };
 let rzpSeq = 1;
@@ -321,6 +322,8 @@ function startFakeWhatsApp(port = 4010): Promise<http.Server> {
         return send(200, { display_phone_number: "+91 79075 77979", verified_name: "Ela & Co.", quality_rating: "GREEN", whatsapp_business_manager_messaging_limit: "TIER_2K", id: "100200300" });
       }
       wa.calls.push({ url: req.url || "", body });
+      const failCode = body.to && body.type === "template" ? wa.failFor.get(body.to) : undefined;
+      if (failCode) return send(400, { error: { message: `(#${failCode}) Message failed to send`, code: failCode } });
       if (wa.mode === "fail-auth") return send(401, { error: { message: "Authentication Error", type: "OAuthException", code: 190 } });
       if (wa.mode === "fail-template" && body.type === "template") return send(404, { error: { message: "(#132001) Template name does not exist in the translation", code: 132001 } });
       if (wa.mode === "fail-window" && body.type === "text") {
@@ -2298,6 +2301,183 @@ async function main() {
   const board = ((await (await kitchen.fetch("/api/orders")).json()).orders as AdminOrder[]).filter((o) => o.customerPhone === `+${buyer}`);
   ok(board.length === 2 && board.every((o) => o.source === "whatsapp"), "kitchen and admin boards list the WhatsApp orders");
   await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "RAZORPAY" }) });
+
+  // ---------- Bulk WhatsApp campaigns (#3–#5) ----------
+  section("Bulk WhatsApp: Excel import, validation, consent, sending and delivery status");
+  type CampRecipient = { id: string; phone: string; name: string | null; status: string; error: string | null; waMessageId: string | null };
+  type CampDetail = {
+    campaign: { id: string; status: string; optInConfirmed: boolean };
+    stats: { total: number; pending: number; sent: number; delivered: number; read: number; failed: number; skipped: number };
+    problems: string[];
+    previewText: string;
+    columns: string[];
+    recipients: { items: CampRecipient[]; total: number };
+  };
+  const campDetail = async (id: string, qs = "") => (await (await admin.fetch(`/api/admin/campaigns/${id}${qs}`)).json()) as CampDetail;
+  const addRows = (id: string, body: unknown) => admin.fetch(`/api/admin/campaigns/${id}/recipients`, { method: "POST", body: JSON.stringify(body) });
+  ok((await new Client().fetch("/api/admin/campaigns")).status === 401, "campaigns need a login → 401");
+  ok((await kitchen.fetch("/api/admin/campaigns")).status === 403, "kitchen staff can't use bulk messaging → 403");
+  ok((await customer.fetch("/api/admin/campaigns")).status === 403, "customers can't use bulk messaging → 403");
+
+  const allTpls = (await (await admin.fetch("/api/admin/whatsapp/templates")).json()).templates as Tpl[];
+  const fest = allTpls.find((t) => t.name === "festive_offer")!;
+  const utilTpl = allTpls.find((t) => t.name === "order_followup")!;
+  const pendingT = allTpls.find((t) => t.name === "new_menu_pending")!;
+  ok((await admin.fetch("/api/admin/campaigns", { method: "POST", body: JSON.stringify({ name: "Nope", templateId: pendingT.id }) })).status === 400, "only approved templates can be used for a campaign");
+  const campRes = await admin.fetch("/api/admin/campaigns", { method: "POST", body: JSON.stringify({ name: "Onam offer", templateId: fest.id }) });
+  const camp = (await campRes.json()).campaign as { id: string; status: string };
+  ok(campRes.status === 201 && camp.status === "DRAFT", "admin creates a draft campaign with an approved template");
+
+  // STOP opts someone out before the list is even uploaded.
+  const stamp = String(Date.now()).slice(-8);
+  const stopper = `9197${stamp}`;
+  const aiBeforeStop = ai.calls.length;
+  await inbound(stopper, "STOP", { name: "Stopper" });
+  const stopReply = await waitFor(async () => wa.calls.find((c) => c.body.to === stopper && /won't get offers/.test(c.body.text?.body ?? "")) ?? null);
+  ok(!!stopReply, "replying STOP opts out of offers, with a confirmation");
+  ok(!ai.calls.slice(aiBeforeStop).some((c) => JSON.stringify(c.body.messages).includes('"content":"STOP"')), "…and STOP is never answered by the AI");
+
+  // An Excel sheet with good, duplicate, invalid and opted-out rows.
+  const good1 = `98${stamp}`;
+  const good2 = `87${stamp}`;
+  const good3 = `76${stamp}`;
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("List");
+  ws.addRow(["Customer Name", "WhatsApp Number", "City"]);
+  ws.addRow(["Anu Varghese", good1, "Pattom"]);
+  ws.addRow(["Bala K", Number(`91${good2}`), "Kowdiar"]);
+  ws.addRow(["Dup Anu", `+91 ${good1.slice(0, 5)} ${good1.slice(5)}`, "Pattom"]);
+  ws.addRow(["Landline", "0471 2345678", "Tvm"]);
+  ws.addRow(["Short", "12345", ""]);
+  ws.addRow(["Empty", "", ""]);
+  ws.addRow(["Stopper", stopper, ""]);
+  const fd = new FormData();
+  fd.append("file", new Blob([new Uint8Array(await wb.xlsx.writeBuffer())]), "customers.xlsx");
+  const imp = await admin.fetchRaw("/api/admin/campaigns/import", { method: "POST", body: fd });
+  const sheet = (await imp.json()) as { columns: string[]; rows: Record<string, string>[]; phoneColumn: string; nameColumn: string };
+  ok(imp.status === 200 && sheet.phoneColumn === "WhatsApp Number" && sheet.nameColumn === "Customer Name" && sheet.rows.length === 7, "an Excel list is read and its number and name columns are found");
+  ok(sheet.rows[1]["WhatsApp Number"] === `91${good2}`, "…long numbers stay exact (never 9.1E+11)");
+  const toRows = (rows: Record<string, string>[]) => rows.map((r, i) => ({ phone: r["WhatsApp Number"], name: r["Customer Name"], data: { City: r.City ?? "" }, row: i + 2 }));
+  const rep1 = (await (await addRows(camp.id, { rows: toRows(sheet.rows) })).json()).report as { added: number; duplicates: number; optedOut: number; alreadyAdded: number; invalid: { reason: string }[] };
+  ok(rep1.added === 2 && rep1.duplicates === 1 && rep1.optedOut === 1 && rep1.invalid.length === 3, `numbers are checked: 2 added, 1 duplicate, 1 opted out, 3 invalid (got ${rep1.added}/${rep1.duplicates}/${rep1.optedOut}/${rep1.invalid.length})`);
+  ok(rep1.invalid.some((x) => /mobile/i.test(x.reason)) && rep1.invalid.some((x) => /short/i.test(x.reason)) && rep1.invalid.some((x) => /No number/.test(x.reason)), "…each invalid row says why (landline, too short, missing)");
+  const rep2 = (await (await addRows(camp.id, { rows: toRows(sheet.rows) })).json()).report as { added: number; alreadyAdded: number };
+  ok(rep2.added === 0 && rep2.alreadyAdded === 2, "adding the same list again adds nobody twice");
+  const badFile = new FormData();
+  badFile.append("file", new Blob(["not a spreadsheet"]), "old.xls");
+  ok((await admin.fetchRaw("/api/admin/campaigns/import", { method: "POST", body: badFile })).status === 400, "an unsupported file type is refused with a clear message");
+  const csvFd = new FormData();
+  csvFd.append("file", new Blob([`Name,Phone\nCSV Person,+91-${good3}\n`], { type: "text/csv" }), "list.csv");
+  const csvSheet = await (await admin.fetchRaw("/api/admin/campaigns/import", { method: "POST", body: csvFd })).json();
+  const rep3 = (await (await addRows(camp.id, { rows: csvSheet.rows.map((r: Record<string, string>) => ({ phone: r.Phone, name: r.Name })) })).json()).report;
+  ok(csvSheet.rows?.length === 1 && rep3.added === 1, "CSV files work too");
+  const crmRep = (await (await addRows(camp.id, { crm: "ordered" })).json()).report as { added: number };
+  ok(crmRep.added >= 1, `customers who have ordered can be added straight from the CRM (${crmRep.added})`);
+  let cd = await campDetail(camp.id);
+  const total0 = cd.stats.total;
+  const bala = cd.recipients.items.find((r) => r.name === "Bala K")!;
+  await admin.fetch(`/api/admin/campaigns/${camp.id}/recipients?id=${bala.id}`, { method: "DELETE" });
+  cd = await campDetail(camp.id);
+  ok(cd.stats.total === total0 - 1 && !cd.recipients.items.some((r) => r.name === "Bala K"), "the admin reviews the list and removes someone");
+  ok(cd.columns.includes("City"), "extra sheet columns are offered for the message");
+
+  // Not sendable until the message is complete and consent is confirmed.
+  let sendTry = await admin.fetch(`/api/admin/campaigns/${camp.id}/send`, { method: "POST" });
+  ok(sendTry.status === 400 && (await sendTry.json()).problems?.length > 0, "sending is refused until every template variable is filled in");
+  const festParams = {
+    header_media: { source: "text", value: "https://example.com/onam.jpg" },
+    "body:first_name": { source: "first_name", fallback: "there" },
+    "body:discount": { source: "text", value: "20%" },
+    "button:1": { source: "text", value: "menu" },
+    "button:2": { source: "text", value: "ONAM20" },
+  };
+  await admin.fetch(`/api/admin/campaigns/${camp.id}`, { method: "PATCH", body: JSON.stringify({ params: festParams }) });
+  cd = await campDetail(camp.id);
+  ok(cd.problems.length === 0 && cd.previewText.includes("Hi Anu! Enjoy 20% off"), "the preview shows the first recipient's personalised message");
+  sendTry = await admin.fetch(`/api/admin/campaigns/${camp.id}/send`, { method: "POST" });
+  ok(sendTry.status === 400 && /agreed/i.test((await sendTry.json()).error), "…and until the admin confirms everyone agreed to WhatsApp messages");
+  await admin.fetch(`/api/admin/campaigns/${camp.id}`, { method: "PATCH", body: JSON.stringify({ optInConfirmed: true }) });
+
+  wa.failFor.set(`91${good3}`, 131049);
+  const waBeforeCamp = wa.calls.length;
+  sendTry = await admin.fetch(`/api/admin/campaigns/${camp.id}/send`, { method: "POST" });
+  ok(sendTry.status === 200 && (await sendTry.json()).recipients === cd.stats.total, "the confirmed campaign starts sending");
+  ok((await admin.fetch(`/api/admin/campaigns/${camp.id}/send`, { method: "POST" })).status === 200, "a second click doesn't start a second send");
+  const doneC = await waitFor(async () => {
+    const x = await campDetail(camp.id);
+    return x.campaign.status === "COMPLETED" ? x : null;
+  }, 20000);
+  ok(!!doneC, "…and completes");
+  const campCalls = wa.calls.slice(waBeforeCamp).filter((c) => c.body.template?.name === "festive_offer");
+  ok(campCalls.length === cd.stats.total && new Set(campCalls.map((c) => c.body.to)).size === cd.stats.total, `each person is sent the template exactly once (${campCalls.length})`);
+  ok(JSON.stringify(campCalls.find((c) => c.body.to === `91${good1}`)?.body.template?.components).includes('"text":"Anu"'), "…personalised with their first name");
+  ok(!campCalls.some((c) => c.body.to === stopper), "people who opted out are never sent it");
+  const failedR = doneC?.recipients.items.find((r) => r.phone === `91${good3}`);
+  ok(doneC?.stats.failed === 1 && failedR?.status === "FAILED" && /held back/i.test(failedR.error || ""), "a message WhatsApp holds back is marked failed, with the reason");
+  wa.failFor.clear();
+
+  const anu = doneC!.recipients.items.find((r) => r.phone === `91${good1}`)!;
+  for (const st of ["delivered", "read"]) {
+    const raw = receipt(st, anu.waMessageId!);
+    await postHook(raw, waSign(raw));
+  }
+  const crmR = doneC!.recipients.items.find((r) => r.status === "SENT" && r.phone !== `91${good1}`)!;
+  const failRaw = receipt("failed", crmR.waMessageId!, { errors: [{ code: 131026, title: "Message undeliverable" }] });
+  await postHook(failRaw, waSign(failRaw));
+  const tracked = await campDetail(camp.id);
+  ok(tracked.recipients.items.find((r) => r.id === anu.id)?.status === "READ" && tracked.stats.read === 1 && tracked.stats.delivered >= 1, "delivery and read receipts update each recipient");
+  ok(tracked.stats.failed === 2 && tracked.recipients.items.find((r) => r.id === crmR.id)?.status === "FAILED", "a 'failed' receipt marks that recipient failed");
+  ok(tracked.stats.sent === tracked.stats.total - tracked.stats.failed - tracked.stats.skipped, "campaign totals add up: sent, delivered, read, failed");
+  const exportCsv = await (await admin.fetch(`/api/admin/campaigns/${camp.id}/export`)).text();
+  ok(exportCsv.includes("READ") && exportCsv.includes(`+91${good1}`) && exportCsv.includes("FAILED"), "the per-recipient delivery report can be downloaded");
+  ok((await admin.fetch(`/api/admin/campaigns/${camp.id}`, { method: "PATCH", body: JSON.stringify({ name: "Changed" }) })).status === 409, "a sent campaign can't be edited");
+  ok((await admin.fetch(`/api/admin/campaigns/${camp.id}`, { method: "DELETE" })).status === 409, "…or deleted (kept as a record)");
+  const list = (await (await admin.fetch("/api/admin/campaigns")).json()).campaigns as { id: string; stats: { read: number } }[];
+  ok(list.find((x) => x.id === camp.id)?.stats.read === 1, "the campaign list shows each campaign's numbers");
+
+  // The campaign shows in the recipient's chat, and the AI knows what they're replying to.
+  ai.calls.length = 0;
+  await inbound(`91${good1}`, "Yes I'd like that offer", { name: "Anu Varghese" });
+  const anuConv = await waitFor(async () => (await convByPhone(`91${good1}`)) ?? null);
+  const anuDetail = anuConv ? ((await (await admin.fetch(`/api/admin/whatsapp/conversations/${anuConv.id}`)).json()) as { broadcasts?: { campaign: string }[] }) : null;
+  ok(!!anuDetail?.broadcasts?.some((b) => b.campaign === "Onam offer"), "staff see the campaign message in that customer's chat");
+  await waitFor(async () => (ai.calls.length ? true : null));
+  const anuPrompt = JSON.stringify(ai.calls[ai.calls.length - 1]?.body.messages ?? []);
+  ok(anuPrompt.includes("[Offer we sent you on WhatsApp]") && anuPrompt.includes("Hi Anu! Enjoy 20% off"), "…and the AI sees the offer the customer is replying to");
+
+  // WhatsApp's own marketing opt-out, and START.
+  const prefRaw = JSON.stringify({
+    object: "whatsapp_business_account",
+    entry: [{ id: "WABA", changes: [{ field: "user_preferences", value: { messaging_product: "whatsapp", user_preferences: [{ wa_id: `91${good2}`, detail: "User requested to stop marketing messages", category: "marketing_messages", value: "stop", timestamp: Math.floor(Date.now() / 1000) }] } }] }],
+  });
+  const prefRes = await postHook(prefRaw, waSign(prefRaw));
+  ok(prefRes.status === 200 && (await prefRes.json()).preferences === 1, "WhatsApp's 'stop marketing' webhook is recorded");
+  await inbound(stopper, "START", { name: "Stopper" });
+  ok(!!(await waitFor(async () => wa.calls.find((c) => c.body.to === stopper && /Welcome back/.test(c.body.text?.body ?? "")) ?? null)), "replying START opts back in");
+  const camp2 = (await (await admin.fetch("/api/admin/campaigns", { method: "POST", body: JSON.stringify({ name: "Order follow-up", templateId: utilTpl.id }) })).json()).campaign as { id: string };
+  const rep4 = (await (await addRows(camp2.id, { rows: [{ phone: `91${good2}`, name: "Bala K" }, { phone: stopper, name: "Stopper" }] })).json()).report as { added: number; optedOut: number };
+  ok(rep4.optedOut === 1 && rep4.added === 1, "the next campaign leaves out the WhatsApp opt-out and includes the person who opted back in");
+
+  // Stopping a campaign: whoever hasn't been sent it yet is skipped.
+  await admin.fetch(`/api/admin/campaigns/${camp2.id}`, { method: "PATCH", body: JSON.stringify({ params: { "body:1": { source: "first_name", fallback: "there" }, "body:2": { source: "text", value: "#TEST" } }, optInConfirmed: true }) });
+  await (async () => {
+    const pc = new PrismaClient();
+    try {
+      // Hold the sending lease so nothing goes out before the stop.
+      await pc.waCampaign.update({ where: { id: camp2.id }, data: { leaseUntil: new Date(Date.now() + 300_000) } });
+    } finally {
+      await pc.$disconnect();
+    }
+  })();
+  await admin.fetch(`/api/admin/campaigns/${camp2.id}/send`, { method: "POST" });
+  const stop = await admin.fetch(`/api/admin/campaigns/${camp2.id}/cancel`, { method: "POST" });
+  const stopped2 = await campDetail(camp2.id);
+  ok(stop.status === 200 && stopped2.campaign.status === "CANCELLED" && stopped2.stats.skipped === 1 && stopped2.stats.pending === 0, "stopping a campaign skips everyone not yet sent");
+  ok((await admin.fetch(`/api/admin/campaigns/${camp2.id}/cancel`, { method: "POST" })).status === 409, "…and it can only be stopped once");
+  const campAudit = await (await admin.fetch("/api/admin/audit?action=campaign.sent&limit=5")).json();
+  ok(campAudit.total >= 1, "campaign sends are in the audit log");
+  const sample = await admin.fetch("/api/admin/campaigns/sample");
+  ok(sample.status === 200 && (sample.headers.get("content-type") || "").includes("spreadsheetml"), "a sample Excel sheet can be downloaded");
 
   // ---------- Concurrency: no overselling ----------
   section("Stock safety under concurrent orders");

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText, MapPin, TicketPercent, Wallet, Contact, Star, LifeBuoy, Crown, CalendarClock, Settings, MessageCircle, MessagesSquare, Globe } from "lucide-react";
+import { LogOut, Loader2, ClipboardList, UtensilsCrossed, Users, ChefHat, BarChart3, ScrollText, MapPin, TicketPercent, Wallet, Contact, Star, LifeBuoy, Crown, CalendarClock, Settings, MessageCircle, MessagesSquare, Globe, Megaphone } from "lucide-react";
 import { useAuth, type Role } from "@/lib/auth-client";
 import { BrandLogo } from "@/components/site/BrandLogo";
 
@@ -19,6 +19,7 @@ const ADMIN_NAV = [
   { href: "/admin/memberships", label: "Memberships", icon: Crown },
   { href: "/admin/crm", label: "Customers", icon: Contact },
   { href: "/admin/whatsapp", label: "WhatsApp", icon: MessagesSquare },
+  { href: "/admin/campaigns", label: "Bulk WhatsApp", icon: Megaphone },
   { href: "/admin/reviews", label: "Reviews", icon: Star },
   { href: "/admin/complaints", label: "Support", icon: LifeBuoy },
   { href: "/admin/notifications", label: "WhatsApp Log", icon: MessageCircle },
