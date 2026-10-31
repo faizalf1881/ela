@@ -6,7 +6,9 @@ import { interactiveText, markRead, sendWhatsApp, whatsappConfigured, type Inter
 import type { TemplatePreview } from "./wa-template-utils";
 import { explainWhatsAppError } from "./order-notify";
 import { resolveProvider } from "./ai/config";
-import { askAssistant, buildPrompt, customerContext } from "./ai/assistant";
+import { askAssistant, buildPrompt, customerContext, inventedAmounts, type AssistantAnswer } from "./ai/assistant";
+import { applyIntent, intentFromReply, orderingFacts, textIntent, type OrderIntent } from "./wa-order/flow";
+import { withLead } from "./wa-order/messages";
 
 /**
  * WhatsApp customer chat (spec #39–#42).
@@ -21,8 +23,8 @@ import { askAssistant, buildPrompt, customerContext } from "./ai/assistant";
 
 /** Gathers quick consecutive messages into one AI reply. */
 const DEBOUNCE_MS = Number(process.env.AI_REPLY_DELAY_MS ?? 2500);
-/** Per conversation, per hour — beyond this a person should look. */
-const MAX_AI_REPLIES_PER_HOUR = 20;
+/** Per conversation, per hour — beyond this a person should look. Ordering taps each get a reply, so this is generous. */
+const MAX_AI_REPLIES_PER_HOUR = 60;
 export const REPLY_WINDOW_MS = 24 * 60 * 60_000;
 
 /** The assistant is working on a reply right now (cleared when it answers; ignored after a minute). */
@@ -264,16 +266,30 @@ export async function sendReadReceipt(conv: WaConversation, typing = false): Pro
  */
 export async function aiReply(conversationId: string, triggerMessageId: string): Promise<void> {
   try {
+    const [first, trigger, setting] = await Promise.all([
+      prisma.waConversation.findUnique({ where: { id: conversationId } }),
+      prisma.waMessage.findUnique({ where: { id: triggerMessageId } }),
+      prisma.storeSetting.findUnique({ where: { id: 1 }, select: { waOrderingEnabled: true } }),
+    ]);
+    if (!first || !trigger) return;
+    const ordering = setting?.waOrderingEnabled ?? true;
+
+    // A tap on one of our buttons or lists, or the answer to a question we just
+    // asked, needs no AI: it is handled at once, every tap counting.
+    if (ordering && first.mode === "AI") {
+      const draft = await prisma.waOrderDraft.findUnique({ where: { conversationId }, select: { step: true } });
+      const intent = intentFromReply(trigger.replyId) ?? textIntent(trigger.body, trigger.type, draft);
+      if (intent) {
+        await showTyping(conversationId, trigger.waMessageId);
+        await runOrderIntent(conversationId, intent);
+        if (first.state !== "AI_HANDLING") await changeHandling(conversationId, { state: "AI_HANDLING", reason: null }, { type: "ai", label: "Ordering assistant" });
+        return;
+      }
+    }
+
     // "typing…" straight away — but only when an answer is really coming, as
     // Meta asks: AI mode with a working assistant.
-    const [first, trigger] = await Promise.all([
-      prisma.waConversation.findUnique({ where: { id: conversationId } }),
-      prisma.waMessage.findUnique({ where: { id: triggerMessageId }, select: { waMessageId: true } }),
-    ]);
-    if (first?.mode === "AI" && (await resolveProvider()).provider) {
-      await prisma.waConversation.update({ where: { id: conversationId }, data: { aiTypingAt: new Date() } });
-      if (trigger?.waMessageId && whatsappConfigured()) void markRead(trigger.waMessageId, true);
-    }
+    if (first.mode === "AI" && (await resolveProvider()).provider) await showTyping(conversationId, trigger.waMessageId);
 
     if (DEBOUNCE_MS > 0) await new Promise((r) => setTimeout(r, DEBOUNCE_MS));
 
@@ -306,9 +322,10 @@ export async function aiReply(conversationId: string, triggerMessageId: string):
       profileName: conv.profileName,
       history: history.map((h) => ({ sender: h.sender, body: h.body })),
       instructions: resolved.instructions,
+      ordering: ordering ? await orderingFacts(conversationId) : null,
     });
 
-    let answer;
+    let answer: AssistantAnswer;
     try {
       answer = await askAssistant(resolved.provider, turns, latest.body);
     } catch (e) {
@@ -321,10 +338,36 @@ export async function aiReply(conversationId: string, triggerMessageId: string):
     const now = await prisma.waConversation.findUniqueOrThrow({ where: { id: conversationId } });
     if (now.mode !== "AI") return stopTyping(conversationId);
 
-    await sendChatMessage(now, answer.reply, "AI");
     if (answer.handoff) {
+      await sendChatMessage(now, answer.reply, "AI");
       await changeHandling(conversationId, { mode: "HUMAN", state: "REQUIRES_ATTENTION", reason: answer.reason }, { type: "ai", label: resolved.provider.label });
-    } else if (now.state !== "AI_HANDLING") {
+      return;
+    }
+
+    // Never let a made-up price reach the customer (spec #9): drop the text
+    // and let the menu, with its real prices, answer instead.
+    const invented = inventedAmounts(answer.reply, turns[0].content, latest.body);
+    if (invented.length) {
+      await audit({
+        actor: { type: "ai", label: resolved.provider.label },
+        action: "ai.price_blocked",
+        entityType: "conversation",
+        entityId: conversationId,
+        summary: `The AI's reply quoted a price that isn't on the menu (₹${invented.join(", ₹")}) — replaced with the live menu`,
+        metadata: { reply: answer.reply, invented },
+      });
+      answer = { ...answer, reply: "Here's our menu with today's prices 👇", action: answer.action === "none" ? "show_menu" : answer.action };
+      if (!ordering) answer.reply = "Our team will confirm the exact price for you shortly.";
+    }
+
+    const intent = ordering ? actionIntent(answer) : null;
+    if (intent) {
+      // The assistant's words become the body of the list / buttons it chose.
+      await runOrderIntent(conversationId, intent, intent.type === "suggest" || intent.type === "menu" ? undefined : answer.reply);
+    } else {
+      await sendChatMessage(now, answer.reply, "AI");
+    }
+    if (now.state !== "AI_HANDLING") {
       await changeHandling(conversationId, { state: "AI_HANDLING", reason: null }, { type: "ai", label: resolved.provider.label });
     }
   } catch (e) {
@@ -332,6 +375,53 @@ export async function aiReply(conversationId: string, triggerMessageId: string):
     // eslint-disable-next-line no-console
     console.error("[wa-chat] AI reply failed:", conversationId, e);
   }
+}
+
+/** The AI's chosen action → an ordering step (null = just send its reply). */
+function actionIntent(a: AssistantAnswer): OrderIntent | null {
+  switch (a.action) {
+    case "suggest":
+      return a.items.length ? { type: "suggest", ids: a.items.map((i) => i.id), body: a.reply } : null;
+    case "show_menu":
+      return { type: "menu", body: a.reply };
+    case "add_to_cart":
+      return a.items.length ? { type: "add_many", items: a.items } : null;
+    case "show_cart":
+      return { type: "cart" };
+    case "checkout":
+      return { type: "checkout" };
+    case "clear_cart":
+      return { type: "clear" };
+    case "resend_link":
+      return { type: "resend_link" };
+    default:
+      return null;
+  }
+}
+
+/** "typing…" for the customer (and staff) while a reply is being prepared. */
+async function showTyping(conversationId: string, waMessageId: string | null) {
+  await prisma.waConversation.update({ where: { id: conversationId }, data: { aiTypingAt: new Date() } });
+  if (waMessageId && whatsappConfigured()) void markRead(waMessageId, true);
+}
+
+/**
+ * One ordering step, then its replies. Steps for the same conversation run
+ * one at a time (a Postgres advisory lock), so two quick taps can't both read
+ * the cart before either has saved it.
+ */
+export async function runOrderIntent(conversationId: string, intent: OrderIntent, lead?: string) {
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${conversationId}))`;
+      let outs = await applyIntent(conversationId, intent);
+      if (lead) outs = withLead(outs, lead);
+      const conv = await prisma.waConversation.findUniqueOrThrow({ where: { id: conversationId } });
+      for (const o of outs) await sendChatMessage(conv, o, "AI");
+      if (!outs.length) await stopTyping(conversationId);
+    },
+    { maxWait: 20_000, timeout: 60_000 },
+  );
 }
 
 /** The assistant won't answer after all: drop the "typing…" bubble. */

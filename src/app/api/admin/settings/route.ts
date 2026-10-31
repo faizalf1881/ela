@@ -10,6 +10,7 @@ import { DEFAULT_ORDER_SOUND } from "@/lib/order-sound-config";
 import { DEFAULT_MESSAGES, NOTIFY_STATUSES, PLACEHOLDERS, type NotifyStatus } from "@/lib/order-notify";
 import { whatsappConfigured } from "@/lib/whatsapp";
 import { GATEWAY_LABEL, gatewayAvailability, pickGateway, siteUrl } from "@/lib/payments";
+import { resolveProvider } from "@/lib/ai/config";
 import type { Prisma } from "@prisma/client";
 
 export const runtime = "nodejs";
@@ -24,6 +25,8 @@ async function load() {
   const s =
     (await prisma.storeSetting.findUnique({ where: { id: 1 } })) ??
     (await prisma.storeSetting.create({ data: { id: 1, acceptingOrders: true } }));
+  const [ai, locations] = await Promise.all([resolveProvider(), prisma.deliveryLocation.count({ where: { active: true } })]);
+  const gateway = pickGateway(s.paymentGateway);
   return {
     scanSteps: normalizeScanSteps(s.scanSteps),
     orderAlert: {
@@ -42,6 +45,19 @@ async function load() {
       placeholders: PLACEHOLDERS,
       template: s.waStatusTemplate,
       templateLang: s.waStatusTemplateLang,
+    },
+    // WhatsApp ordering (spec #8–#14) and what it depends on.
+    ordering: {
+      enabled: s.waOrderingEnabled,
+      checks: {
+        whatsapp: whatsappConfigured(),
+        ai: !!ai.provider,
+        aiNote: ai.provider ? ai.provider.label : ai.reason,
+        payments: gateway ? GATEWAY_LABEL[gateway] : null,
+        cod: s.codEnabled,
+        locations,
+        accepting: s.acceptingOrders,
+      },
     },
     payments: (() => {
       const active = pickGateway(s.paymentGateway);
@@ -75,6 +91,7 @@ const schema = z.object({
   waStatusTemplate: z.string().trim().regex(/^[a-z0-9_]{1,512}$/, "Template names use lower-case letters, digits and _").nullable().or(z.literal("")).optional(),
   waStatusTemplateLang: z.string().trim().regex(/^[a-z]{2,3}(_[A-Z]{2})?$/).optional(),
   paymentGateway: z.enum(["AUTO", "CASHFREE", "RAZORPAY"]).optional(),
+  waOrderingEnabled: z.boolean().optional(),
 });
 
 export async function PATCH(req: Request) {
@@ -99,6 +116,7 @@ export async function PATCH(req: Request) {
     waStatusTemplate?: string | null;
     waStatusTemplateLang?: string;
     paymentGateway?: string;
+    waOrderingEnabled?: boolean;
   } = {};
   const changes: string[] = [];
 
@@ -146,6 +164,10 @@ export async function PATCH(req: Request) {
     changes.push(data.waStatusTemplate ? `WhatsApp status template set to ${data.waStatusTemplate}` : "WhatsApp status template removed");
   }
   if (d.waStatusTemplateLang) data.waStatusTemplateLang = d.waStatusTemplateLang;
+  if (d.waOrderingEnabled !== undefined) {
+    data.waOrderingEnabled = d.waOrderingEnabled;
+    changes.push(`WhatsApp ordering turned ${d.waOrderingEnabled ? "ON" : "OFF"}`);
+  }
   if (d.paymentGateway) {
     data.paymentGateway = d.paymentGateway;
     const resolved = pickGateway(d.paymentGateway);

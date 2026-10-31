@@ -50,6 +50,8 @@ const FILTERS: { key: string; label: string; match: (o: OrderDTO) => boolean }[]
   { key: "PREPARING", label: "Preparing", match: (o) => o.status === "PREPARING" },
   { key: "OUT_FOR_DELIVERY", label: "Out for delivery", match: (o) => o.status === "OUT_FOR_DELIVERY" },
   { key: "DELIVERED", label: "Delivered", match: (o) => o.status === "DELIVERED" },
+  { key: "PENDING", label: "Awaiting payment", match: (o) => o.status === "PENDING" },
+  { key: "whatsapp", label: "WhatsApp", match: (o) => o.source === "whatsapp" },
   { key: "subscription", label: "Subscription", match: (o) => o.source === "subscription" },
   { key: "all", label: "All", match: () => true },
 ];
@@ -61,6 +63,8 @@ const ADVANCE: Partial<Record<OrderStatus, { next: OrderStatus; label: string }>
   PREPARING: { next: "OUT_FOR_DELIVERY", label: "Out for delivery" },
   OUT_FOR_DELIVERY: { next: "DELIVERED", label: "Mark delivered" },
 };
+
+const orderTime = (iso: string) => new Date(iso).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
 
 function minutesSince(iso: string) {
   return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
@@ -389,6 +393,15 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
                           <Repeat className="h-3 w-3" /> Subscription
                         </span>
                       )}
+                      {o.source === "whatsapp" && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-[#25D366]/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#128C7E]" title="Ordered through the WhatsApp assistant">
+                          <MessageCircle className="h-3 w-3" /> WhatsApp
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-muted-foreground" title="Order date and time">
+                      {orderTime(o.placedAt ?? o.createdAt)}
+                      {o.invoiceNo ? ` · ${o.invoiceNo}` : ""}
                     </div>
                     <div className={`mt-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${urgency}`}>
                       <Clock className="h-3 w-3" /> {mins === 0 ? "just now" : `${mins} min ago`}
@@ -401,9 +414,28 @@ export function OrdersBoard({ showStats = false }: { showStats?: boolean }) {
                   {o.items.map((it) => (
                     <div key={it.id} className="flex justify-between text-foreground/90">
                       <span className="font-medium">{it.qty}× {it.name}</span>
-                      <span className="text-muted-foreground">{inr(it.price * it.qty)}</span>
+                      <span className="text-muted-foreground">
+                        {it.qty > 1 ? <span className="mr-1 text-[11px]">{inr(it.price)} each ·</span> : null}
+                        {inr(it.price * it.qty)}
+                      </span>
                     </div>
                   ))}
+                  <div className="space-y-0.5 pt-1 text-xs text-muted-foreground">
+                    <div className="flex justify-between">
+                      <span>Subtotal</span>
+                      <span className="tabular-nums">{inr(o.subtotal)}</span>
+                    </div>
+                    {(o.couponDiscount ?? 0) + (o.membershipDiscount ?? 0) > 0 && (
+                      <div className="flex justify-between text-forest">
+                        <span>{o.couponDiscount ? "Coupon" : "Member"}{o.couponDiscount && o.membershipDiscount ? " + member" : ""} discount</span>
+                        <span className="tabular-nums">− {inr((o.couponDiscount ?? 0) + (o.membershipDiscount ?? 0))}</span>
+                      </div>
+                    )}
+                    <div className="flex justify-between">
+                      <span>Delivery</span>
+                      <span className="tabular-nums">{o.deliveryFee ? inr(o.deliveryFee) : "Free"}</span>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="mt-3 border-t border-border pt-3 space-y-1.5 text-sm text-muted-foreground">

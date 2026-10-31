@@ -233,6 +233,17 @@ function cfSign(ts: string, raw: string) {
 /** Scripted model: hands off on "refund", otherwise answers normally (so the keyword safety net can be tested). */
 function fakeAiAnswer(body: AiCall["body"]): string {
   const lastUser = [...(body.messages ?? [])].reverse().find((m) => m.role === "user")?.content ?? "";
+  const sys = body.messages?.[0]?.content ?? "";
+  // Ordering scripts read the real menu ids from the prompt, like a model would.
+  const dishes = [...sys.matchAll(/- \[([a-z0-9]+)\] (.+?) — ₹/g)].map((m) => ({ id: m[1], name: m[2].trim() }));
+  if (/dinner for one/i.test(lastUser)) {
+    return JSON.stringify({ reply: "For dinner for one, these are lovely:", handoff: false, reason: "", action: "suggest", items: dishes.slice(0, 2).map((d) => ({ id: d.id })) });
+  }
+  if (/add one veg meal/i.test(lastUser)) {
+    const v = dishes.find((d) => /veg/i.test(d.name));
+    return JSON.stringify({ reply: `Added a ${v?.name ?? "veg meal"} for you.`, handoff: false, reason: "", action: "add_to_cart", items: v ? [{ id: v.id, qty: 1 }] : [] });
+  }
+  if (/special price/i.test(lastUser)) return JSON.stringify({ reply: "Fish Meals is just ₹99 today!", handoff: false, reason: "", action: "none" });
   if (/ping/.test(lastUser)) return JSON.stringify({ reply: "pong" });
   if (/refund/i.test(lastUser)) return JSON.stringify({ reply: "I'm sorry about that. A team member will take over here shortly.", handoff: true, reason: "Refund request" });
   return JSON.stringify({ reply: `Thanks! (AI) You said: ${lastUser.slice(0, 40)}`, handoff: false, reason: "" });
@@ -2060,6 +2071,232 @@ async function main() {
   ok(refundAudit.total >= 2, "refunds are in the audit log");
 
   // Back to Razorpay for the rest of the run.
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "RAZORPAY" }) });
+
+  // ---------- WhatsApp ordering, end to end (#8–#14) ----------
+  section("WhatsApp ordering: suggest → cart → checkout → payment link → paid");
+  await admin.fetch("/api/admin/ai", { method: "PATCH", body: JSON.stringify({ provider: "OPENAI" }) });
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "CASHFREE" }) });
+  const ordSet = (await (await admin.fetch("/api/admin/settings")).json()).ordering;
+  ok(ordSet?.enabled === true && ordSet.checks.ai === true && ordSet.checks.payments === "Cashfree" && ordSet.checks.locations > 0, "WhatsApp ordering is on, with its readiness checklist");
+
+  type Row = { id: string; title: string; description?: string };
+  const buyer = "919" + String(Date.now()).slice(-9);
+  const buyerName = "Meera Nair";
+  const say = (text: string, id?: string) => inbound(buyer, text, { name: buyerName, id });
+  const tap = (replyId: string, title: string, kind: "button" | "list" = "button") => {
+    const raw = JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [
+        {
+          id: "WABA",
+          changes: [
+            {
+              field: "messages",
+              value: {
+                messaging_product: "whatsapp",
+                metadata: { display_phone_number: "917907577979", phone_number_id: "100200300" },
+                contacts: [{ profile: { name: buyerName }, wa_id: buyer }],
+                messages: [
+                  {
+                    from: buyer,
+                    id: `wamid.TAP${Date.now()}${inboundSeq++}`,
+                    timestamp: String(Math.floor(Date.now() / 1000)),
+                    type: "interactive",
+                    interactive: kind === "button" ? { type: "button_reply", button_reply: { id: replyId, title } } : { type: "list_reply", list_reply: { id: replyId, title } },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    return postHook(raw, waSign(raw));
+  };
+  const outTo = (from: number) => wa.calls.slice(from).filter((c) => c.body.to === buyer && (c.body.type === "interactive" || c.body.type === "text"));
+  const next = (from: number, pred: (c: WaCall) => boolean = () => true) => waitFor(async () => outTo(from).find(pred) ?? null, 9000);
+  const isInteractive = (c: WaCall) => c.body.type === "interactive";
+  const rowsOf = (c: WaCall | null) => ((c?.body.interactive?.action as { sections?: { rows: Row[] }[] } | undefined)?.sections ?? []).flatMap((x) => x.rows);
+  const buttonsOf = (c: WaCall | null) => ((c?.body.interactive?.action as { buttons?: { reply: { id: string; title: string } }[] } | undefined)?.buttons ?? []).map((b) => b.reply);
+  const bodyOf = (c: WaCall | null) => c?.body.interactive?.body?.text ?? c?.body.text?.body ?? "";
+  const rupees = (n: number) => `₹${n.toLocaleString("en-IN")}`;
+  type AdminOrder = { id: string; source: string; total: number; status: string; paymentStatus: string; paymentMethod: string; invoiceNo: string | null; address: string; customerPhone: string; deliveryFee: number; items: { name: string; qty: number; price: number }[] };
+  const ordersFor = async () => ((await (await admin.fetch("/api/orders")).json()).orders as AdminOrder[]).filter((o) => o.customerPhone === `+${buyer}`);
+  const orderById = async (id: string) => (await (await admin.fetch(`/api/orders/${id}`)).json()).order as AdminOrder;
+  const live = (await (await new Client().fetch("/api/menu")).json()).items as { id: string; name: string; price: number; discountPercent: number; stock: number | null }[];
+  const dish = live.find((m) => /fish/i.test(m.name)) ?? live[0];
+  const veg = live.find((m) => /veg/i.test(m.name))!;
+  const dishEff = eff(dish);
+
+  // The AI understands the request and suggests real dishes to tap.
+  let mark = wa.calls.length;
+  ai.calls.length = 0;
+  await say("Hi! I want to order dinner for one");
+  const sugg = await next(mark, isInteractive);
+  const suggRows = rowsOf(sugg);
+  ok(sugg?.body.interactive?.type === "list" && bodyOf(sugg).startsWith("For dinner for one") && suggRows.length === 2, "'dinner for one' → the AI suggests dishes as a list to tap");
+  ok(suggRows.every((r) => live.some((m) => r.id === `o:d:${m.id}`)) && suggRows.every((r) => r.title.length <= 24 && (r.description ?? "").length <= 72), "…only real dishes from the live menu, within WhatsApp's list limits");
+  const orderSys = ai.calls[ai.calls.length - 1]?.body.messages?.[0]?.content ?? "";
+  ok(orderSys.includes("Taking orders here on WhatsApp") && orderSys.includes(`[${live[0].id}]`) && orderSys.includes("Cart: empty."), "the AI gets the live menu with ids, the ordering rules and the customer's cart");
+  ok(wa.calls.slice(mark).some((c) => !!c.body.typing_indicator), "…and the customer sees 'typing…' while it thinks");
+
+  // Tap a dish → how many → cart.
+  mark = wa.calls.length;
+  await tap(`o:d:${dish.id}`, dish.name, "list");
+  const dishMsg = await next(mark, isInteractive);
+  ok(buttonsOf(dishMsg).map((b) => b.id).join() === `o:q:${dish.id}:1,o:q:${dish.id}:2,o:q:${dish.id}:3` && bodyOf(dishMsg).includes(rupees(dishEff)), "tapping a dish asks how many, with its real price");
+  mark = wa.calls.length;
+  await tap(`o:q:${dish.id}:2`, "2");
+  const cart1 = await next(mark, isInteractive);
+  ok(bodyOf(cart1).includes(`2× ${dish.name} — ${rupees(dishEff * 2)}`) && buttonsOf(cart1).map((b) => b.title).join() === "Checkout,Add more,Edit order", "the cart shows 2 × the dish at the live price, with Checkout / Add more / Edit order");
+  mark = wa.calls.length;
+  await tap(`o:d:${dish.id}`, dish.name, "list");
+  await next(mark, isInteractive);
+  mark = wa.calls.length;
+  await say("3");
+  ok(bodyOf(await next(mark, isInteractive)).includes(`3× ${dish.name}`), "typing a number sets the quantity");
+
+  // The AI adds what it understood; "menu" shows the live menu.
+  mark = wa.calls.length;
+  await say("Please also add one veg meal");
+  const cart3 = await next(mark, isInteractive);
+  ok(bodyOf(cart3).startsWith(`Added a ${veg.name}`) && bodyOf(cart3).includes(`1× ${veg.name}`) && bodyOf(cart3).includes(`3× ${dish.name}`), "the AI adds the dish it understood; its words lead the cart message");
+  mark = wa.calls.length;
+  await say("menu");
+  const menuMsg = await next(mark, isInteractive);
+  ok(menuMsg?.body.interactive?.type === "list" && rowsOf(menuMsg).length === live.filter((m) => m.stock === null || m.stock > 0).length, "typing 'menu' shows the whole live menu as a list");
+  ok(bodyOf(menuMsg).includes(`Most Popular: *${fish.name}*`), "…headed by the dish featured on the website");
+
+  // An invented price never reaches the customer.
+  mark = wa.calls.length;
+  await say("is there any special price today?");
+  const guarded = await next(mark);
+  await sleep(300);
+  ok(!JSON.stringify(wa.calls.slice(mark)).includes("₹99"), "an invented price from the AI is never sent");
+  ok(guarded?.body.interactive?.type === "list", "…the live menu with real prices is sent instead");
+  ok(((await (await admin.fetch("/api/admin/audit?action=ai.price_blocked&limit=1")).json()).total ?? 0) > 0, "…and the blocked reply is in the audit log");
+
+  // Sold out: not offered, and removed at checkout.
+  await admin.fetch(`/api/menu/${veg.id}`, { method: "PATCH", body: JSON.stringify({ stock: 0 }) });
+  mark = wa.calls.length;
+  await tap(`o:d:${veg.id}`, veg.name, "list");
+  const soldMsg = await next(mark, isInteractive);
+  ok(bodyOf(soldMsg).includes("sold out") && !rowsOf(soldMsg).some((r) => r.id === `o:d:${veg.id}`), "a sold-out dish can't be picked and isn't offered");
+  mark = wa.calls.length;
+  await tap("o:x", "Checkout");
+  const dropped = await next(mark, isInteractive);
+  ok(bodyOf(dropped).includes(`${veg.name} is sold out`) && !bodyOf(dropped).includes(`× ${veg.name}`), "checkout re-checks stock: the sold-out dish is taken out and the customer is told");
+  await admin.fetch(`/api/menu/${veg.id}`, { method: "PATCH", body: JSON.stringify({ stock: veg.stock }) });
+
+  // Checkout: area → time → address → summary.
+  mark = wa.calls.length;
+  await tap("o:x", "Checkout");
+  const areaMsg = await next(mark, isInteractive);
+  const areaRows = rowsOf(areaMsg);
+  ok(areaRows.length > 1 && areaRows.every((r) => r.id.startsWith("o:a:") && /delivery/i.test(r.description ?? "")), "checkout asks for the delivery area, each with its fee");
+  const area = areaRows.find((r) => r.id === `o:a:${locationId}`) ?? areaRows[0];
+  const areaLoc = ((await (await new Client().fetch("/api/locations")).json()).locations as { id: string; deliveryFee: number }[]).find((l) => `o:a:${l.id}` === area.id)!;
+  mark = wa.calls.length;
+  await tap(area.id, area.title, "list");
+  const slotMsg = await next(mark, isInteractive);
+  const slotRows = rowsOf(slotMsg);
+  ok(slotRows.length > 0 && slotRows.every((r) => r.id.startsWith("o:s:")), "then a delivery time from the real schedule");
+  mark = wa.calls.length;
+  await tap(slotRows[0].id, slotRows[0].title, "list");
+  ok(/delivery address/i.test(bodyOf(await next(mark))), "then the delivery address");
+  mark = wa.calls.length;
+  await say("Flat 4B, Lotus Apartments, near the temple");
+  const reviewMsg = await next(mark, isInteractive);
+  const total1 = dishEff * 3 + areaLoc.deliveryFee;
+  ok(bodyOf(reviewMsg).includes(`*Total: ${rupees(total1)}*`) && bodyOf(reviewMsg).includes("Flat 4B") && bodyOf(reviewMsg).includes(buyerName), "the summary shows the items, delivery fee, exact total, address and name");
+  ok(buttonsOf(reviewMsg)[0]?.title === `Pay ${rupees(total1)}` && buttonsOf(reviewMsg).some((b) => b.id === "o:p:cod"), "…with Pay online and Cash on delivery buttons");
+
+  // A price change before confirming: new total shown, nothing ordered.
+  await admin.fetch(`/api/menu/${dish.id}`, { method: "PATCH", body: JSON.stringify({ price: dish.price + 10 }) });
+  const newEff = eff({ ...dish, price: dish.price + 10 });
+  const total2 = newEff * 3 + areaLoc.deliveryFee;
+  mark = wa.calls.length;
+  await tap("o:p:online", "Pay");
+  const requote = await next(mark, isInteractive);
+  ok(outTo(mark).some((c) => /price changed/i.test(bodyOf(c))) && bodyOf(requote).includes(`*Total: ${rupees(total2)}*`), "if a price changes before confirming, the customer sees the new total first");
+  ok((await ordersFor()).length === 0, "…and nothing was ordered at the old price");
+
+  // Confirm → order + payment link.
+  mark = wa.calls.length;
+  await tap("o:p:online", "Pay");
+  const linkMsg = await next(mark, (c) => c.body.interactive?.type === "cta_url");
+  const linkParams = (linkMsg?.body.interactive?.action as { parameters?: { display_text: string; url: string } } | undefined)?.parameters;
+  ok(linkParams?.display_text === `Pay ${rupees(total2)}` && /\/pay\/[a-z0-9]+\?k=/.test(linkParams.url), "confirming creates the order and sends a secure payment link button");
+  const waOrder = (await ordersFor())[0];
+  ok(waOrder?.source === "whatsapp" && waOrder.total === total2 && waOrder.status === "PENDING" && waOrder.paymentStatus === "UNPAID", "the order is in the Admin Panel as a WhatsApp order awaiting payment, at the confirmed total");
+  ok(!!waOrder && waOrder.items.some((i) => i.name === dish.name && i.qty === 3 && i.price === newEff) && waOrder.address.includes("Flat 4B") && waOrder.deliveryFee === areaLoc.deliveryFee, "…with dishes, quantities, prices, delivery charge and address");
+  ok(!!(await convByPhone(buyer))?.customerId, "the WhatsApp number becomes a CRM customer linked to the chat");
+  mark = wa.calls.length;
+  await tap("o:p:online", "Pay");
+  await next(mark, (c) => c.body.interactive?.type === "cta_url");
+  ok((await ordersFor()).length === 1, "tapping Pay again resends the same link — never a second order");
+  const linkKey = new URL(linkParams!.url).searchParams.get("k")!;
+  const opened = await (await new Client().fetch(`/api/pay/${waOrder.id}`, { method: "POST", body: JSON.stringify({ k: linkKey }) })).json();
+  ok(opened.gateway === "cashfree" && opened.amount === total2 && cf.orders.get(opened.cashfree.orderId)?.order_amount === total2, "opening the link asks Cashfree for exactly the confirmed total");
+  ok((await orderById(waOrder.id)).paymentStatus === "UNPAID", "…opening or clicking the link marks nothing paid");
+  mark = wa.calls.length;
+  cfPay(opened.cashfree.orderId);
+  await cfHook(successEvent(opened.cashfree.orderId, waOrder.id, total2, 777888));
+  const paidWa = await orderById(waOrder.id);
+  ok(paidWa.paymentStatus === "PAID" && paidWa.status === "PLACED" && !!paidWa.invoiceNo, "Cashfree's verified webhook marks it Paid and Confirmed");
+  ok(!!(await waitFor(async () => wa.calls.slice(mark).some((c) => c.body.to === buyer && JSON.stringify(c.body).includes("confirmed")))), "the customer gets the WhatsApp order confirmation");
+  mark = wa.calls.length;
+  await say("cart");
+  ok(bodyOf(await next(mark, isInteractive)).includes("Your order is empty"), "after payment the WhatsApp cart starts afresh");
+  await admin.fetch(`/api/menu/${dish.id}`, { method: "PATCH", body: JSON.stringify({ price: dish.price }) });
+
+  // Second order, cash on delivery: area and address are remembered.
+  mark = wa.calls.length;
+  await tap(`o:q:${dish.id}:1`, "1");
+  await next(mark, isInteractive);
+  mark = wa.calls.length;
+  await tap("o:x", "Checkout");
+  const slot2 = await next(mark, isInteractive);
+  ok(rowsOf(slot2).length > 0 && rowsOf(slot2).every((r) => r.id.startsWith("o:s:")), "the next order remembers the area and only asks for a time");
+  mark = wa.calls.length;
+  await tap(rowsOf(slot2)[0].id, rowsOf(slot2)[0].title, "list");
+  const savedAddr = await next(mark, isInteractive);
+  ok(buttonsOf(savedAddr).some((b) => b.id === "o:as") && bodyOf(savedAddr).includes("Flat 4B"), "…and offers the saved address");
+  mark = wa.calls.length;
+  await tap("o:as", "Use this address");
+  await next(mark, isInteractive);
+  mark = wa.calls.length;
+  await tap("o:p:cod", "Cash on delivery");
+  const codWa = await waitFor(async () => (await ordersFor()).find((o) => o.paymentMethod === "cod") ?? null);
+  ok(codWa?.status === "PLACED" && !!codWa.invoiceNo && codWa.total === dishEff + areaLoc.deliveryFee, "Cash on delivery places the order straight away");
+  ok(!!(await waitFor(async () => wa.calls.slice(mark).some((c) => c.body.to === buyer && JSON.stringify(c.body).includes("confirmed")))), "…and confirms it on WhatsApp");
+
+  // Store closed / ordering switched off / staff handling.
+  await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ acceptingOrders: false, closedMessage: "Closed for Onam today" }) });
+  mark = wa.calls.length;
+  await tap(`o:q:${dish.id}:1`, "1");
+  await next(mark, isInteractive);
+  mark = wa.calls.length;
+  await tap("o:x", "Checkout");
+  ok(bodyOf(await next(mark)).includes("Closed for Onam today"), "while the store is closed, checkout says so instead of taking the order");
+  await admin.fetch("/api/settings", { method: "PATCH", body: JSON.stringify({ acceptingOrders: true }) });
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ waOrderingEnabled: false }) });
+  mark = wa.calls.length;
+  await say("menu");
+  const offReply = await next(mark);
+  ok(!!offReply && offReply.body.type === "text" && !outTo(mark).some(isInteractive), "with WhatsApp ordering switched off, 'menu' is just a question for the assistant");
+  await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ waOrderingEnabled: true }) });
+  const buyerConvId = (await convByPhone(buyer))!.id;
+  await convAction(buyerConvId, "takeover");
+  mark = wa.calls.length;
+  await tap("o:m", "View menu");
+  await sleep(1500);
+  ok(outTo(mark).length === 0, "while staff handle the chat, taps don't trigger the assistant");
+  await convAction(buyerConvId, "handback");
+
+  const board = ((await (await kitchen.fetch("/api/orders")).json()).orders as AdminOrder[]).filter((o) => o.customerPhone === `+${buyer}`);
+  ok(board.length === 2 && board.every((o) => o.source === "whatsapp"), "kitchen and admin boards list the WhatsApp orders");
   await admin.fetch("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ paymentGateway: "RAZORPAY" }) });
 
   // ---------- Concurrency: no overselling ----------

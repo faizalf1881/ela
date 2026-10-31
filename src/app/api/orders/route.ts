@@ -4,6 +4,7 @@ import { prisma } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 import { activeGateway, startOnlinePayment } from "@/lib/payments";
 import { effectivePrice } from "@/lib/pricing";
+import { orderTotals } from "@/lib/order-pricing";
 import { finalizeOrder, OutOfStockError } from "@/lib/fulfillment";
 import { notifyOrderStatus, notifyNewOrderToAdmin } from "@/lib/notify";
 import { audit, actorFrom } from "@/lib/audit";
@@ -141,13 +142,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "None of the selected items are available." }, { status: 400 });
   }
 
-  const subtotal = lineItems.reduce((n, i) => n + i.price * i.qty, 0);
-  const discountTotal = lineItems.reduce((n, i) => n + (i.mrp - i.price) * i.qty, 0);
-
   // Membership benefits — resolved server-side from the active subscription.
   const membership = await getMembership(s.sub);
-  const membershipDiscount = membership.active ? Math.round((subtotal * membership.discountPercent) / 100) : 0;
-  const deliveryFee = subtotal > 0 && !(membership.active && membership.freeDelivery) ? location.deliveryFee : 0;
+  const { subtotal } = orderTotals(lineItems, { membership, deliveryFee: location.deliveryFee });
 
   // Coupon — re-validated server-side against the live subtotal (never trust the client).
   let couponDiscount = 0;
@@ -159,7 +156,8 @@ export async function POST(req: Request) {
     appliedCode = cr.code;
   }
 
-  const total = Math.max(0, subtotal - membershipDiscount - couponDiscount) + deliveryFee;
+  // The same formula the WhatsApp assistant uses (lib/order-pricing).
+  const { discountTotal, membershipDiscount, deliveryFee, total } = orderTotals(lineItems, { membership, deliveryFee: location.deliveryFee, couponDiscount });
 
   if (total < 1) {
     return NextResponse.json({ error: "Order total too low." }, { status: 400 });

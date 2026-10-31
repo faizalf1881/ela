@@ -298,6 +298,9 @@ model StoreSetting {
   /// otherwise Razorpay) · CASHFREE · RAZORPAY. Memberships stay on Razorpay.
   paymentGateway String @default("AUTO")
 
+  /// Customers can order on WhatsApp with the assistant (spec #8–#14).
+  waOrderingEnabled Boolean @default(true)
+
   updatedAt DateTime @updatedAt
 }
 
@@ -632,6 +635,7 @@ model WaConversation {
   updatedAt       DateTime          @updatedAt
   messages        WaMessage[]
   events          WaHandlingEvent[]
+  draft           WaOrderDraft?
 
   @@index([state])
   @@index([lastMessageAt])
@@ -680,6 +684,31 @@ model WaHandlingEvent {
   createdAt      DateTime       @default(now())
 
   @@index([conversationId, createdAt])
+}
+
+/// A customer's order in progress on WhatsApp (spec #8–#14): the cart and
+/// the checkout answers. No prices are stored — they are read from the menu
+/// each time, so a price change or a sold-out dish applies immediately.
+model WaOrderDraft {
+  id                 String         @id @default(cuid())
+  conversation       WaConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId     String         @unique
+  /// [{ id: menu item id, qty }]
+  items              Json           @default("[]")
+  deliveryLocationId String?
+  /// YYYY-MM-DD, India time
+  deliveryDate       String?
+  deliverySlotId     String?
+  address            String?
+  customerName       String?
+  /// What the assistant is waiting for: BROWSING · QTY:<item id> · AREA · SLOT · ADDRESS · NAME · REVIEW · PAYMENT
+  step               String         @default("BROWSING")
+  /// The total the customer was shown; confirming at any other total is refused.
+  quotedTotal        Int?
+  /// The order created from this cart while it waits for payment.
+  orderId            String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
 }
 
 /// WhatsApp message templates (spec #2/#3): synced from Meta (needs

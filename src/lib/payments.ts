@@ -222,6 +222,11 @@ export async function settleOrderPayment(opts: {
 
   const updated = await finalizeOrder(order.id);
   const ref = `#${order.id.slice(-6).toUpperCase()}`;
+  // A WhatsApp cart that became this order starts afresh (the area and name are kept; the address is offered again).
+  await prisma.waOrderDraft.updateMany({
+    where: { orderId: order.id },
+    data: { items: [], step: "BROWSING", quotedTotal: null, orderId: null, deliveryDate: null, deliverySlotId: null, address: null },
+  });
   await audit({
     actor: opts.actor,
     action: "order.paid",
